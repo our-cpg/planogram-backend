@@ -1,16 +1,23 @@
 export default async function handler(req, res) {
+  // CORS headers - send on EVERY response
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Max-Age', '86400');
   
+  // Handle preflight
   if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+    res.status(200).end();
+    return;
   }
   
+  // Handle GET
   if (req.method === 'GET') {
-    return res.status(200).json({ status: 'Backend is alive!' });
+    res.status(200).json({ status: 'Backend is alive!' });
+    return;
   }
   
+  // Handle POST
   try {
     const { storeName, accessToken, action, upc } = req.body || {};
     
@@ -23,11 +30,13 @@ export default async function handler(req, res) {
       });
       
       if (!response.ok) {
-        return res.status(response.status).json({ error: 'Shopify API error' });
+        res.status(response.status).json({ error: 'Shopify API error' });
+        return;
       }
       
       const data = await response.json();
-      return res.status(200).json({ success: true, shopName: data.shop.name });
+      res.status(200).json({ success: true, shopName: data.shop.name });
+      return;
     }
     
     if (action === 'getProduct' && upc) {
@@ -46,7 +55,7 @@ export default async function handler(req, res) {
       for (const product of data.products) {
         for (const variant of product.variants) {
           if (variant.barcode === upc) {
-            return res.status(200).json({
+            res.status(200).json({
               success: true,
               product: {
                 name: `${product.title}${variant.title !== 'Default Title' ? ' - ' + variant.title : ''}`,
@@ -56,16 +65,18 @@ export default async function handler(req, res) {
                 sku: variant.sku
               }
             });
+            return;
           }
         }
       }
       
-      return res.status(404).json({ error: 'Product not found' });
+      res.status(404).json({ error: 'Product not found' });
+      return;
     }
     
-    return res.status(200).json({ message: 'Backend ready' });
+    res.status(200).json({ message: 'Backend ready' });
     
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    res.status(500).json({ error: error.message });
   }
 }
