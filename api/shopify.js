@@ -37,7 +37,7 @@ export default async function handler(req, res) {
     
     if (action === 'getProduct' && upc) {
       const response = await fetch(
-        `https://${storeName}/admin/api/2024-01/products.json?fields=id,title,variants&limit=250`,
+        `https://${storeName}/admin/api/2024-01/products.json?limit=250`,
         {
           headers: {
             'X-Shopify-Access-Token': accessToken,
@@ -46,9 +46,15 @@ export default async function handler(req, res) {
         }
       );
       
+      if (!response.ok) {
+        return res.status(response.status).json({ error: 'Failed to fetch products' });
+      }
+      
       const data = await response.json();
       
+      // Search through products
       for (const product of data.products) {
+        // First check variant-level barcodes
         for (const variant of product.variants) {
           if (variant.barcode === upc) {
             return res.status(200).json({
@@ -58,19 +64,21 @@ export default async function handler(req, res) {
                 price: parseFloat(variant.price),
                 cost: parseFloat(variant.compare_at_price || variant.price * 0.5),
                 monthlySales: Math.floor(Math.random() * 200) + 50,
-                sku: variant.sku
+                sku: variant.sku,
+                inventoryQuantity: variant.inventory_quantity
               }
             });
           }
         }
       }
       
-      return res.status(404).json({ error: 'Product not found' });
+      return res.status(404).json({ success: false, error: 'Product not found' });
     }
     
     return res.status(200).json({ message: 'Backend ready' });
     
   } catch (error) {
+    console.error('Backend error:', error);
     return res.status(500).json({ error: error.message });
   }
 }
