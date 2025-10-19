@@ -7,81 +7,10 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
-// Product cache
-let productCache = [];
-let cacheStatus = 'empty'; // empty, loading, ready
-let cacheRefreshInProgress = false;
-
-async function refreshProductCache(storeName, accessToken) {
-  if (cacheRefreshInProgress) {
-    console.log('Cache refresh already in progress, skipping...');
-    return;
-  }
-  
-  cacheRefreshInProgress = true;
-  cacheStatus = 'loading';
-  console.log('Starting cache refresh (newest 1000 products)...');
-  
-  try {
-    let allProducts = [];
-    let hasNextPage = true;
-    let pageInfo = null;
-    let pageCount = 0;
-    
-    // Limit to first 1000 products (4 pages of 250)
-    while (hasNextPage && pageCount < 4) {
-      const url = pageInfo 
-        ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
-        : `https://${storeName}/admin/api/2024-01/products.json?limit=250&order=updated_at desc`;
-        
-      const response = await fetch(url, {
-        headers: {
-          'X-Shopify-Access-Token': accessToken,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (!response.ok) {
-        throw new Error('Failed to fetch products');
-      }
-      
-      const data = await response.json();
-      allProducts = allProducts.concat(data.products);
-      pageCount++;
-      
-      // Update cache incrementally
-      productCache = allProducts;
-      console.log(`Loaded page ${pageCount}, total products: ${allProducts.length}`);
-      
-      const linkHeader = response.headers.get('link');
-      if (linkHeader && linkHeader.includes('rel="next"')) {
-        const match = linkHeader.match(/page_info=([^&>]+)/);
-        pageInfo = match ? match[1] : null;
-      } else {
-        hasNextPage = false;
-      }
-      
-      // Small delay to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    
-    productCache = allProducts;
-    cacheStatus = 'ready';
-    console.log(`✅ Cache complete! ${allProducts.length} products loaded (newest first).`);
-  } catch (error) {
-    console.error('Cache refresh failed:', error);
-    cacheStatus = 'error';
-  } finally {
-    cacheRefreshInProgress = false;
-  }
-}
-
 // Test endpoint
 app.get('/api/shopify', (req, res) => {
   res.json({ 
-    status: 'Backend is alive!',
-    cacheStatus,
-    cachedProducts: productCache.length
+    status: 'Backend is alive!'
   });
 });
 
@@ -104,52 +33,131 @@ app.post('/api/shopify', async (req, res) => {
       
       const data = await response.json();
       
-      // Start cache refresh in background
-      refreshProductCache(storeName, accessToken);
-      
       return res.json({ 
         success: true, 
         shopName: data.shop.name,
-        message: 'Loading newest 1000 products...'
+        message: 'Connected! Products will be searched on demand.'
       });
     }
     
     if (action === 'getProduct' && upc) {
       const searchUPC = String(upc).trim();
+      console.log('Searching for UPC:', searchUPC);
       
-      // If cache is loading, wait a bit
-      if (productCache.length === 0 && cacheStatus === 'loading') {
-        await new Promise(resolve => setTimeout(resolve, 3000));
-      }
+      let hasNextPage = true;
+      let cursor = null;
+      let searchedCount = 0;
       
-      // Search through cached products
-      for (const product of productCache) {
-        for (const variant of product.variants || []) {
-          if (String(variant.barcode || '').trim() === searchUPC) {
-            return res.json({
-              success: true,
-              product: {
-                name: `${product.title}${variant.title !== 'Default Title' ? ' - ' + variant.title : ''}`,
-                price: parseFloat(variant.price),
-                cost: parseFloat(variant.compare_at_price || variant.price * 0.5),
-                monthlySales: Math.floor(Math.random() * 200) + 50,
-                sku: variant.sku
+      // Use GraphQL for faster pagination through ALL products
+      while (hasNextPage) {
+        const query = `
+          {
+            products(first: 250${cursor ? `, after: "${cursor}"` : ''}) {
+              pageInfo {
+                hasNextPage
+                endCursor
               }
-            });
+              edges {
+                node {
+                  id
+                  title
+                  variants(first: 100) {
+                    edges {
+                      node {
+                        barcode
+                        price
+                        compareAtPrice
+                        sku
+                        title
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        `;
+        
+        const response = await fetch(`https://${storeName}/admin/api/2024-01/graphql.json`, {
+          method: 'POST',
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ query })
+        });
+        
+        if (!response.ok) {
+          console.error('GraphQL error:', response.status);
+          return res.status(response.status).json({ 
+            error: 'Shopify API error',
+            status: response.status
+          });
+        }
+        
+        const data = await response.json();
+        
+        if (data.errors) {
+          console.error('GraphQL errors:', data.errors);
+          return res.status(400).json({ 
+            error: 'GraphQL query error',
+            details: data.errors
+          });
+        }
+        
+        const products = data.data.products;
+        searchedCount += products.edges.length;
+        
+        // Search in this batch
+        for (const edge of products.edges) {
+          const product = edge.node;
+          for (const variantEdge of product.variants.edges) {
+            const variant = variantEdge.node;
+            if (String(variant.barcode || '').trim() === searchUPC) {
+              console.log('✅ FOUND PRODUCT:', product.title);
+              return res.json({
+                success: true,
+                product: {
+                  upc: variant.barcode,
+                  name: `${product.title}${variant.title !== 'Default Title' ? ' - ' + variant.title : ''}`,
+                  price: parseFloat(variant.price),
+                  cost: variant.compareAtPrice ? parseFloat(variant.compareAtPrice) : parseFloat(variant.price) * 0.5,
+                  monthlySales: Math.floor(Math.random() * 200) + 50,
+                  sku: variant.sku
+                }
+              });
+            }
           }
         }
+        
+        hasNextPage = products.pageInfo.hasNextPage;
+        cursor = products.pageInfo.endCursor;
+        
+        console.log(`Searched ${searchedCount} products so far...`);
+        
+        // Safety limit - stop after 10,000 products
+        if (searchedCount > 10000) {
+          console.log('Reached 10,000 product limit');
+          break;
+        }
+        
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
       
+      console.log(`❌ Product not found after searching ${searchedCount} products`);
       return res.status(404).json({ 
-        error: 'Product not found in cache',
-        searchedProducts: productCache.length,
-        hint: 'Newest 1000 products cached. Older products not available.'
+        success: false, 
+        error: 'Product not found',
+        searchedUPC: searchUPC,
+        searchedProducts: searchedCount
       });
     }
     
     return res.json({ message: 'Backend ready' });
     
   } catch (error) {
+    console.error('Server error:', error);
     return res.status(500).json({ error: error.message });
   }
 });
