@@ -1,5 +1,3 @@
-// Force deploy v3
-
 export default async function handler(req, res) {
   // CORS headers - send on EVERY response
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -38,19 +36,10 @@ export default async function handler(req, res) {
     }
     
     if (action === 'getProduct' && upc) {
-      // Normalize UPC to string and trim
       const searchUPC = String(upc).trim();
       
-      const debugInfo = {
-        searchingFor: searchUPC,
-        productsChecked: 0,
-        variantsChecked: 0,
-        barcodesSeen: []
-      };
-      
-      // Fetch ALL product data (don't limit fields)
       const response = await fetch(
-        `https://${storeName}/admin/api/2024-01/products.json?limit=250`,
+        `https://${storeName}/admin/api/2024-01/products.json?limit=10`,
         {
           headers: {
             'X-Shopify-Access-Token': accessToken,
@@ -60,47 +49,26 @@ export default async function handler(req, res) {
       );
       
       if (!response.ok) {
-        return res.status(response.status).json({ 
-          error: 'Failed to fetch products',
-          debug: debugInfo
-        });
+        return res.status(response.status).json({ error: 'Failed to fetch products' });
       }
       
       const data = await response.json();
-      debugInfo.productsChecked = data.products?.length || 0;
       
-      // Search through products
-      for (const product of data.products || []) {
-        // Check each variant's barcode
-        for (const variant of product.variants || []) {
-          debugInfo.variantsChecked++;
-          const variantBarcode = String(variant.barcode || '').trim();
-          
-          if (variantBarcode) {
-            debugInfo.barcodesSeen.push(variantBarcode);
-          }
-          
-          // Compare as strings to preserve leading zeros
-          if (variantBarcode === searchUPC) {
-            return res.status(200).json({
-              success: true,
-              product: {
-                name: `${product.title}${variant.title !== 'Default Title' ? ' - ' + variant.title : ''}`,
-                price: parseFloat(variant.price),
-                cost: parseFloat(variant.compare_at_price || variant.price * 0.5),
-                monthlySales: Math.floor(Math.random() * 200) + 50,
-                sku: variant.sku,
-                inventoryQuantity: variant.inventory_quantity
-              }
-            });
-          }
-        }
-      }
+      // Just return the first 10 products with their barcodes so we can see what Shopify gives us
+      const productInfo = data.products.map(p => ({
+        title: p.title,
+        variants: p.variants.map(v => ({
+          title: v.title,
+          barcode: v.barcode,
+          sku: v.sku,
+          price: v.price
+        }))
+      }));
       
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Product not found',
-        debug: debugInfo
+      return res.status(200).json({
+        searchingFor: searchUPC,
+        productsReturned: data.products.length,
+        products: productInfo
       });
     }
     
