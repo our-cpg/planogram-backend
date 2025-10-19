@@ -7,9 +7,59 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
+// Product cache
+let productCache = null;
+let cacheTimestamp = null;
+const CACHE_DURATION = 60 * 60 * 1000; // 1 hour
+
+// Function to fetch and cache all products
+async function refreshProductCache(storeName, accessToken) {
+  console.log('Refreshing product cache...');
+  let allProducts = [];
+  let hasNextPage = true;
+  let pageInfo = null;
+  
+  while (hasNextPage) {
+    const url = pageInfo 
+      ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
+      : `https://${storeName}/admin/api/2024-01/products.json?limit=250`;
+      
+    const response = await fetch(url, {
+      headers: {
+        'X-Shopify-Access-Token': accessToken,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error('Failed to fetch products');
+    }
+    
+    const data = await response.json();
+    allProducts = allProducts.concat(data.products);
+    
+    const linkHeader = response.headers.get('link');
+    if (linkHeader && linkHeader.includes('rel="next"')) {
+      const match = linkHeader.match(/page_info=([^&>]+)/);
+      pageInfo = match ? match[1] : null;
+    } else {
+      hasNextPage = false;
+    }
+  }
+  
+  productCache = allProducts;
+  cacheTimestamp = Date.now();
+  console.log(`Cache refreshed! ${allProducts.length} products loaded.`);
+  return allProducts;
+}
+
 // Test endpoint
 app.get('/api/shopify', (req, res) => {
-  res.json({ status: 'Backend is alive!' });
+  res.json({ 
+    status: 'Backend is alive!',
+    cachedProducts: productCache ? productCache.length : 0,
+    cacheAge: cacheTimestamp ? Math.floor((Date.now() - cacheTimestamp) / 1000) : null
+  });
 });
 
 // Shopify endpoints
@@ -30,76 +80,33 @@ app.post('/api/shopify', async (req, res) => {
       }
       
       const data = await response.json();
-      return res.json({ success: true, shopName: data.shop.name });
-    }
-
-    if (action === 'debugProduct') {
-      const response = await fetch(
-        `https://${storeName}/admin/api/2024-01/products.json?limit=250&title=Blasting Freeze Spray`,
-        {
-          headers: {
-            'X-Shopify-Access-Token': accessToken,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
       
-      const data = await response.json();
-      
-      return res.json({
-        found: data.products.length,
-        products: data.products.map(p => ({
-          title: p.title,
-          id: p.id,
-          variants: p.variants.map(v => ({
-            title: v.title,
-            barcode: v.barcode,
-            barcodeType: typeof v.barcode,
-            barcodeLength: v.barcode ? v.barcode.length : 0,
-            sku: v.sku
-          }))
-        }))
+      // Refresh cache on connect
+      refreshProductCache(storeName, accessToken).catch(err => {
+        console.error('Failed to refresh cache:', err);
       });
+      
+      return res.json({ success: true, shopName: data.shop.name });
     }
     
     if (action === 'getProduct' && upc) {
       const searchUPC = String(upc).trim();
-      let allProducts = [];
-      let hasNextPage = true;
-      let pageInfo = null;
       
-      // Paginate through ALL products (no limit)
-      while (hasNextPage) {
-        const url = pageInfo 
-          ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
-          : `https://${storeName}/admin/api/2024-01/products.json?limit=250`;
-          
-        const response = await fetch(url, {
-          headers: {
-            'X-Shopify-Access-Token': accessToken,
-            'Content-Type': 'application/json'
-          }
-        });
-        
-        if (!response.ok) {
-          return res.status(response.status).json({ error: 'Failed to fetch products' });
-        }
-        
-        const data = await response.json();
-        allProducts = allProducts.concat(data.products);
-        
-        // Check for next page in Link header
-        const linkHeader = response.headers.get('link');
-        if (linkHeader && linkHeader.includes('rel="next"')) {
-          const match = linkHeader.match(/page_info=([^&>]+)/);
-          pageInfo = match ? match[1] : null;
+      // Check if cache is stale or empty
+      if (!productCache || !cacheTimestamp || (Date.now() - cacheTimestamp) > CACHE_DURATION) {
+        // Refresh cache in background, but still search through what we have
+        if (productCache) {
+          refreshProductCache(storeName, accessToken).catch(err => {
+            console.error('Background cache refresh failed:', err);
+          });
         } else {
-          hasNextPage = false;
+          // No cache at all, need to fetch now
+          await refreshProductCache(storeName, accessToken);
         }
       }
       
-      // Now search for the barcode
-      for (const product of allProducts) {
+      // Search through cached products
+      for (const product of productCache || []) {
         for (const variant of product.variants) {
           if (String(variant.barcode || '').trim() === searchUPC) {
             return res.json({
@@ -118,7 +125,7 @@ app.post('/api/shopify', async (req, res) => {
       
       return res.status(404).json({ 
         error: 'Product not found',
-        searchedProducts: allProducts.length,
+        searchedProducts: productCache ? productCache.length : 0,
         searchingFor: searchUPC
       });
     }
