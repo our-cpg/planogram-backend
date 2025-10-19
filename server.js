@@ -68,8 +68,8 @@ app.post('/api/shopify', async (req, res) => {
       let hasNextPage = true;
       let pageInfo = null;
       
-      // Paginate through ALL products
-      while (hasNextPage && allProducts.length < 4000) {
+      // Paginate through ALL products (no limit)
+      while (hasNextPage) {
         const url = pageInfo 
           ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
           : `https://${storeName}/admin/api/2024-01/products.json?limit=250`;
