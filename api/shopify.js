@@ -1,4 +1,4 @@
-// Updated v2
+// Force deploy v3
 
 export default async function handler(req, res) {
   // CORS headers - send on EVERY response
