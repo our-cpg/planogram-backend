@@ -32,6 +32,35 @@ app.post('/api/shopify', async (req, res) => {
       const data = await response.json();
       return res.json({ success: true, shopName: data.shop.name });
     }
+
+    if (action === 'debugProduct') {
+      const response = await fetch(
+        `https://${storeName}/admin/api/2024-01/products.json?limit=250&title=Blasting Freeze Spray`,
+        {
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      const data = await response.json();
+      
+      return res.json({
+        found: data.products.length,
+        products: data.products.map(p => ({
+          title: p.title,
+          id: p.id,
+          variants: p.variants.map(v => ({
+            title: v.title,
+            barcode: v.barcode,
+            barcodeType: typeof v.barcode,
+            barcodeLength: v.barcode ? v.barcode.length : 0,
+            sku: v.sku
+          }))
+        }))
+      });
+    }
     
     if (action === 'getProduct' && upc) {
       const searchUPC = String(upc).trim();
