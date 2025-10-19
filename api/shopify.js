@@ -36,6 +36,11 @@ export default async function handler(req, res) {
     }
     
     if (action === 'getProduct' && upc) {
+      // Normalize UPC to string and trim
+      const searchUPC = String(upc).trim();
+      
+      console.log(`Searching for UPC: "${searchUPC}"`);
+      
       // Fetch ALL product data (don't limit fields)
       const response = await fetch(
         `https://${storeName}/admin/api/2024-01/products.json?limit=250`,
@@ -53,14 +58,19 @@ export default async function handler(req, res) {
       
       const data = await response.json();
       
-      console.log(`Searching for UPC: ${upc} in ${data.products?.length || 0} products`);
+      console.log(`Fetched ${data.products?.length || 0} products`);
       
       // Search through products
       for (const product of data.products || []) {
         // Check each variant's barcode
         for (const variant of product.variants || []) {
-          if (variant.barcode && variant.barcode.toString() === upc.toString()) {
-            console.log(`Found match in variant barcode: ${variant.barcode}`);
+          const variantBarcode = String(variant.barcode || '').trim();
+          
+          console.log(`Checking variant barcode: "${variantBarcode}" against "${searchUPC}"`);
+          
+          // Compare as strings to preserve leading zeros
+          if (variantBarcode === searchUPC) {
+            console.log(`✅ Found match! Product: ${product.title}`);
             return res.status(200).json({
               success: true,
               product: {
@@ -76,7 +86,7 @@ export default async function handler(req, res) {
         }
       }
       
-      console.log('Product not found');
+      console.log('❌ Product not found');
       return res.status(404).json({ success: false, error: 'Product not found' });
     }
     
