@@ -3,12 +3,12 @@ import cors from 'cors';
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Middleware - CORS fixed for Vercel frontend
+// Middleware - Allow all origins
 app.use(cors({
-  origin: ['https://planogram-frontend.vercel.app', 'https://planogram-frontend-git-main-arins-projects-c533686b.vercel.app'],
-  credentials: true,
+  origin: '*',
+  credentials: false,
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type']
 }));
 app.use(express.json());
 
