@@ -118,6 +118,18 @@ app.post('/api/shopify', async (req, res) => {
         message: 'Loading newest 1000 products...'
       });
     }
+
+    // NEW: Manual cache refresh action
+    if (action === 'refreshCache') {
+      console.log('Manual cache refresh requested');
+      await refreshProductCache(storeName, accessToken);
+      return res.json({ 
+        success: true, 
+        message: 'Cache refreshed successfully',
+        productsLoaded: productCache.length,
+        cacheStatus
+      });
+    }
     
     if (action === 'getProduct' && upc) {
       const searchUPC = String(upc).trim();
