@@ -1,3 +1,5 @@
+// Updated v2
+
 export default async function handler(req, res) {
   // CORS headers - send on EVERY response
   res.setHeader('Access-Control-Allow-Origin', '*');
