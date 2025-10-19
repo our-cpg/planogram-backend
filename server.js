@@ -10,9 +10,6 @@ app.use(express.json());
 // Product cache
 let productCache = [];
 let cacheStatus = 'empty'; // empty, loading, ready
-let totalProductsExpected = 0;
-
-// Background cache refresh
 let cacheRefreshInProgress = false;
 
 async function refreshProductCache(storeName, accessToken) {
@@ -23,7 +20,7 @@ async function refreshProductCache(storeName, accessToken) {
   
   cacheRefreshInProgress = true;
   cacheStatus = 'loading';
-  console.log('Starting cache refresh...');
+  console.log('Starting cache refresh (newest 1000 products)...');
   
   try {
     let allProducts = [];
@@ -31,10 +28,11 @@ async function refreshProductCache(storeName, accessToken) {
     let pageInfo = null;
     let pageCount = 0;
     
-    while (hasNextPage) {
+    // Limit to first 1000 products (4 pages of 250)
+    while (hasNextPage && pageCount < 4) {
       const url = pageInfo 
         ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
-        : `https://${storeName}/admin/api/2024-01/products.json?limit=250`;
+        : `https://${storeName}/admin/api/2024-01/products.json?limit=250&order=updated_at desc`;
         
       const response = await fetch(url, {
         headers: {
@@ -51,7 +49,7 @@ async function refreshProductCache(storeName, accessToken) {
       allProducts = allProducts.concat(data.products);
       pageCount++;
       
-      // Update cache incrementally so searches work while loading
+      // Update cache incrementally
       productCache = allProducts;
       console.log(`Loaded page ${pageCount}, total products: ${allProducts.length}`);
       
@@ -68,9 +66,8 @@ async function refreshProductCache(storeName, accessToken) {
     }
     
     productCache = allProducts;
-    totalProductsExpected = allProducts.length;
     cacheStatus = 'ready';
-    console.log(`✅ Cache complete! ${allProducts.length} products loaded.`);
+    console.log(`✅ Cache complete! ${allProducts.length} products loaded (newest first).`);
   } catch (error) {
     console.error('Cache refresh failed:', error);
     cacheStatus = 'error';
@@ -84,8 +81,7 @@ app.get('/api/shopify', (req, res) => {
   res.json({ 
     status: 'Backend is alive!',
     cacheStatus,
-    cachedProducts: productCache.length,
-    totalExpected: totalProductsExpected
+    cachedProducts: productCache.length
   });
 });
 
@@ -108,22 +104,22 @@ app.post('/api/shopify', async (req, res) => {
       
       const data = await response.json();
       
-      // Start cache refresh in background (don't await)
+      // Start cache refresh in background
       refreshProductCache(storeName, accessToken);
       
       return res.json({ 
         success: true, 
         shopName: data.shop.name,
-        cacheStatus: 'loading products in background...'
+        message: 'Loading newest 1000 products...'
       });
     }
     
     if (action === 'getProduct' && upc) {
       const searchUPC = String(upc).trim();
       
-      // If cache is empty, wait a bit for it to load
+      // If cache is loading, wait a bit
       if (productCache.length === 0 && cacheStatus === 'loading') {
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
       
       // Search through cached products
@@ -138,20 +134,16 @@ app.post('/api/shopify', async (req, res) => {
                 cost: parseFloat(variant.compare_at_price || variant.price * 0.5),
                 monthlySales: Math.floor(Math.random() * 200) + 50,
                 sku: variant.sku
-              },
-              cacheStatus,
-              searchedProducts: productCache.length
+              }
             });
           }
         }
       }
       
       return res.status(404).json({ 
-        error: 'Product not found',
+        error: 'Product not found in cache',
         searchedProducts: productCache.length,
-        cacheStatus,
-        searchingFor: searchUPC,
-        hint: cacheStatus === 'loading' ? 'Cache still loading, product might appear soon' : null
+        hint: 'Newest 1000 products cached. Older products not available.'
       });
     }
     
