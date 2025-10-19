@@ -3,23 +3,26 @@ import cors from 'cors';
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Middleware - CORS configured for Vercel frontend
-app.use(cors({
-  origin: ['https://planogram-frontend.vercel.app', 'http://localhost:3000'],
-  credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  exposedHeaders: ['Content-Range', 'X-Content-Range']
-}));
-
-// Handle preflight requests
-app.options('*', cors());
+// Aggressive CORS middleware - set headers on EVERY response
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Expose-Headers', 'Content-Range, X-Content-Range');
+  
+  // Handle preflight
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  
+  next();
+});
 
 app.use(express.json());
 
 // Product cache
 let productCache = [];
-let cacheStatus = 'empty'; // empty, loading, ready
+let cacheStatus = 'empty';
 let cacheRefreshInProgress = false;
 
 async function refreshProductCache(storeName, accessToken) {
@@ -38,7 +41,6 @@ async function refreshProductCache(storeName, accessToken) {
     let pageInfo = null;
     let pageCount = 0;
     
-    // Limit to first 1000 products (4 pages of 250)
     while (hasNextPage && pageCount < 4) {
       const url = pageInfo 
         ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
@@ -59,7 +61,6 @@ async function refreshProductCache(storeName, accessToken) {
       allProducts = allProducts.concat(data.products);
       pageCount++;
       
-      // Update cache incrementally
       productCache = allProducts;
       console.log(`Loaded page ${pageCount}, total products: ${allProducts.length}`);
       
@@ -71,13 +72,12 @@ async function refreshProductCache(storeName, accessToken) {
         hasNextPage = false;
       }
       
-      // Small delay to avoid rate limiting
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     
     productCache = allProducts;
     cacheStatus = 'ready';
-    console.log(`✅ Cache complete! ${allProducts.length} products loaded (newest first).`);
+    console.log(`✅ Cache complete! ${allProducts.length} products loaded.`);
   } catch (error) {
     console.error('Cache refresh failed:', error);
     cacheStatus = 'error';
@@ -86,7 +86,6 @@ async function refreshProductCache(storeName, accessToken) {
   }
 }
 
-// Test endpoint
 app.get('/api/shopify', (req, res) => {
   res.json({ 
     status: 'Backend is alive!',
@@ -95,7 +94,6 @@ app.get('/api/shopify', (req, res) => {
   });
 });
 
-// Shopify endpoints
 app.post('/api/shopify', async (req, res) => {
   const { storeName, accessToken, action, upc } = req.body || {};
   
@@ -113,8 +111,6 @@ app.post('/api/shopify', async (req, res) => {
       }
       
       const data = await response.json();
-      
-      // Start cache refresh in background
       refreshProductCache(storeName, accessToken);
       
       return res.json({ 
@@ -124,7 +120,6 @@ app.post('/api/shopify', async (req, res) => {
       });
     }
 
-    // NEW: Manual cache refresh action
     if (action === 'refreshCache') {
       console.log('Manual cache refresh requested');
       await refreshProductCache(storeName, accessToken);
@@ -139,12 +134,10 @@ app.post('/api/shopify', async (req, res) => {
     if (action === 'getProduct' && upc) {
       const searchUPC = String(upc).trim();
       
-      // If cache is loading, wait a bit
       if (productCache.length === 0 && cacheStatus === 'loading') {
         await new Promise(resolve => setTimeout(resolve, 3000));
       }
       
-      // Search through cached products
       for (const product of productCache) {
         for (const variant of product.variants || []) {
           if (String(variant.barcode || '').trim() === searchUPC) {
