@@ -8,57 +8,84 @@ app.use(cors());
 app.use(express.json());
 
 // Product cache
-let productCache = null;
-let cacheTimestamp = null;
-const CACHE_DURATION = 60 * 60 * 1000; // 1 hour
+let productCache = [];
+let cacheStatus = 'empty'; // empty, loading, ready
+let totalProductsExpected = 0;
 
-// Function to fetch and cache all products
+// Background cache refresh
+let cacheRefreshInProgress = false;
+
 async function refreshProductCache(storeName, accessToken) {
-  console.log('Refreshing product cache...');
-  let allProducts = [];
-  let hasNextPage = true;
-  let pageInfo = null;
-  
-  while (hasNextPage) {
-    const url = pageInfo 
-      ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
-      : `https://${storeName}/admin/api/2024-01/products.json?limit=250`;
-      
-    const response = await fetch(url, {
-      headers: {
-        'X-Shopify-Access-Token': accessToken,
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    if (!response.ok) {
-      throw new Error('Failed to fetch products');
-    }
-    
-    const data = await response.json();
-    allProducts = allProducts.concat(data.products);
-    
-    const linkHeader = response.headers.get('link');
-    if (linkHeader && linkHeader.includes('rel="next"')) {
-      const match = linkHeader.match(/page_info=([^&>]+)/);
-      pageInfo = match ? match[1] : null;
-    } else {
-      hasNextPage = false;
-    }
+  if (cacheRefreshInProgress) {
+    console.log('Cache refresh already in progress, skipping...');
+    return;
   }
   
-  productCache = allProducts;
-  cacheTimestamp = Date.now();
-  console.log(`Cache refreshed! ${allProducts.length} products loaded.`);
-  return allProducts;
+  cacheRefreshInProgress = true;
+  cacheStatus = 'loading';
+  console.log('Starting cache refresh...');
+  
+  try {
+    let allProducts = [];
+    let hasNextPage = true;
+    let pageInfo = null;
+    let pageCount = 0;
+    
+    while (hasNextPage) {
+      const url = pageInfo 
+        ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
+        : `https://${storeName}/admin/api/2024-01/products.json?limit=250`;
+        
+      const response = await fetch(url, {
+        headers: {
+          'X-Shopify-Access-Token': accessToken,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch products');
+      }
+      
+      const data = await response.json();
+      allProducts = allProducts.concat(data.products);
+      pageCount++;
+      
+      // Update cache incrementally so searches work while loading
+      productCache = allProducts;
+      console.log(`Loaded page ${pageCount}, total products: ${allProducts.length}`);
+      
+      const linkHeader = response.headers.get('link');
+      if (linkHeader && linkHeader.includes('rel="next"')) {
+        const match = linkHeader.match(/page_info=([^&>]+)/);
+        pageInfo = match ? match[1] : null;
+      } else {
+        hasNextPage = false;
+      }
+      
+      // Small delay to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    productCache = allProducts;
+    totalProductsExpected = allProducts.length;
+    cacheStatus = 'ready';
+    console.log(`✅ Cache complete! ${allProducts.length} products loaded.`);
+  } catch (error) {
+    console.error('Cache refresh failed:', error);
+    cacheStatus = 'error';
+  } finally {
+    cacheRefreshInProgress = false;
+  }
 }
 
 // Test endpoint
 app.get('/api/shopify', (req, res) => {
   res.json({ 
     status: 'Backend is alive!',
-    cachedProducts: productCache ? productCache.length : 0,
-    cacheAge: cacheTimestamp ? Math.floor((Date.now() - cacheTimestamp) / 1000) : null
+    cacheStatus,
+    cachedProducts: productCache.length,
+    totalExpected: totalProductsExpected
   });
 });
 
@@ -81,33 +108,27 @@ app.post('/api/shopify', async (req, res) => {
       
       const data = await response.json();
       
-      // Refresh cache on connect
-      refreshProductCache(storeName, accessToken).catch(err => {
-        console.error('Failed to refresh cache:', err);
-      });
+      // Start cache refresh in background (don't await)
+      refreshProductCache(storeName, accessToken);
       
-      return res.json({ success: true, shopName: data.shop.name });
+      return res.json({ 
+        success: true, 
+        shopName: data.shop.name,
+        cacheStatus: 'loading products in background...'
+      });
     }
     
     if (action === 'getProduct' && upc) {
       const searchUPC = String(upc).trim();
       
-      // Check if cache is stale or empty
-      if (!productCache || !cacheTimestamp || (Date.now() - cacheTimestamp) > CACHE_DURATION) {
-        // Refresh cache in background, but still search through what we have
-        if (productCache) {
-          refreshProductCache(storeName, accessToken).catch(err => {
-            console.error('Background cache refresh failed:', err);
-          });
-        } else {
-          // No cache at all, need to fetch now
-          await refreshProductCache(storeName, accessToken);
-        }
+      // If cache is empty, wait a bit for it to load
+      if (productCache.length === 0 && cacheStatus === 'loading') {
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
       
       // Search through cached products
-      for (const product of productCache || []) {
-        for (const variant of product.variants) {
+      for (const product of productCache) {
+        for (const variant of product.variants || []) {
           if (String(variant.barcode || '').trim() === searchUPC) {
             return res.json({
               success: true,
@@ -117,7 +138,9 @@ app.post('/api/shopify', async (req, res) => {
                 cost: parseFloat(variant.compare_at_price || variant.price * 0.5),
                 monthlySales: Math.floor(Math.random() * 200) + 50,
                 sku: variant.sku
-              }
+              },
+              cacheStatus,
+              searchedProducts: productCache.length
             });
           }
         }
@@ -125,8 +148,10 @@ app.post('/api/shopify', async (req, res) => {
       
       return res.status(404).json({ 
         error: 'Product not found',
-        searchedProducts: productCache ? productCache.length : 0,
-        searchingFor: searchUPC
+        searchedProducts: productCache.length,
+        cacheStatus,
+        searchingFor: searchUPC,
+        hint: cacheStatus === 'loading' ? 'Cache still loading, product might appear soon' : null
       });
     }
     
