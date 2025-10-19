@@ -39,7 +39,12 @@ export default async function handler(req, res) {
       // Normalize UPC to string and trim
       const searchUPC = String(upc).trim();
       
-      console.log(`Searching for UPC: "${searchUPC}"`);
+      const debugInfo = {
+        searchingFor: searchUPC,
+        productsChecked: 0,
+        variantsChecked: 0,
+        barcodesSeen: []
+      };
       
       // Fetch ALL product data (don't limit fields)
       const response = await fetch(
@@ -53,24 +58,28 @@ export default async function handler(req, res) {
       );
       
       if (!response.ok) {
-        return res.status(response.status).json({ error: 'Failed to fetch products' });
+        return res.status(response.status).json({ 
+          error: 'Failed to fetch products',
+          debug: debugInfo
+        });
       }
       
       const data = await response.json();
-      
-      console.log(`Fetched ${data.products?.length || 0} products`);
+      debugInfo.productsChecked = data.products?.length || 0;
       
       // Search through products
       for (const product of data.products || []) {
         // Check each variant's barcode
         for (const variant of product.variants || []) {
+          debugInfo.variantsChecked++;
           const variantBarcode = String(variant.barcode || '').trim();
           
-          console.log(`Checking variant barcode: "${variantBarcode}" against "${searchUPC}"`);
+          if (variantBarcode) {
+            debugInfo.barcodesSeen.push(variantBarcode);
+          }
           
           // Compare as strings to preserve leading zeros
           if (variantBarcode === searchUPC) {
-            console.log(`✅ Found match! Product: ${product.title}`);
             return res.status(200).json({
               success: true,
               product: {
@@ -86,14 +95,16 @@ export default async function handler(req, res) {
         }
       }
       
-      console.log('❌ Product not found');
-      return res.status(404).json({ success: false, error: 'Product not found' });
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Product not found',
+        debug: debugInfo
+      });
     }
     
     return res.status(200).json({ message: 'Backend ready' });
     
   } catch (error) {
-    console.error('Backend error:', error);
     return res.status(500).json({ error: error.message });
   }
 }
