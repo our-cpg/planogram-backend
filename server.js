@@ -41,7 +41,7 @@ async function refreshProductCache(storeName, accessToken) {
     let pageInfo = null;
     let pageCount = 0;
     
-    while (hasNextPage && pageCount < 4) {
+    while (hasNextPage) { {
       const url = pageInfo 
         ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
         : `https://${storeName}/admin/api/2024-01/products.json?limit=250&order=updated_at desc`;
