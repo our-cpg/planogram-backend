@@ -33,9 +33,6 @@ app.use(express.json());
 // Initialize database tables
 async function initDatabase() {
   try {
-    // Drop existing table to recreate with new schema
-    await pool.query(`DROP TABLE IF EXISTS products CASCADE`);
-    
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         variant_id BIGINT PRIMARY KEY,
