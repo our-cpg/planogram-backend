@@ -33,7 +33,7 @@ async function refreshProductCache(storeName, accessToken) {
   
   cacheRefreshInProgress = true;
   cacheStatus = 'loading';
-  console.log('Starting cache refresh (newest 1000 products)...');
+  console.log('Starting cache refresh (all products)...');
   
   try {
     let allProducts = [];
@@ -41,7 +41,7 @@ async function refreshProductCache(storeName, accessToken) {
     let pageInfo = null;
     let pageCount = 0;
     
-    while (hasNextPage) { {
+    while (hasNextPage) {
       const url = pageInfo 
         ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
         : `https://${storeName}/admin/api/2024-01/products.json?limit=250&order=updated_at desc`;
@@ -116,7 +116,7 @@ app.post('/api/shopify', async (req, res) => {
       return res.json({ 
         success: true, 
         shopName: data.shop.name,
-        message: 'Loading newest 1000 products...'
+        message: 'Loading all products...'
       });
     }
 
@@ -158,7 +158,7 @@ app.post('/api/shopify', async (req, res) => {
       return res.status(404).json({ 
         error: 'Product not found in cache',
         searchedProducts: productCache.length,
-        hint: 'Newest 1000 products cached. Older products not available.'
+        hint: 'All products cached. If product not found, refresh cache.'
       });
     }
     
