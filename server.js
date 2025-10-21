@@ -68,7 +68,7 @@ async function initDatabase() {
   }
 }
 
-// Import products from Shopify (MEMORY EFFICIENT + TITLE FILTER)
+// Import products from Shopify (MEMORY EFFICIENT + TITLE FILTER + NO TRUNCATE!)
 async function importProducts(storeName, accessToken) {
   console.log('🔄 Starting product import from Shopify...');
   console.log('📋 Filtering: Only products with proper title case (not ALL CAPS)');
@@ -80,9 +80,8 @@ async function importProducts(storeName, accessToken) {
     let totalInserted = 0;
     let totalSkipped = 0;
 
-    // Clear existing products first
-    await pool.query('TRUNCATE TABLE products CASCADE');
-    console.log('🗑️ Cleared existing products');
+    // ✅ REMOVED TRUNCATE - Products will persist now!
+    // The ON CONFLICT clause handles updates automatically
 
     // Helper function to check if title is properly formatted
     const isProperlyFormatted = (title) => {
@@ -99,44 +98,47 @@ async function importProducts(storeName, accessToken) {
       return true;
     };
 
-    // Fetch and insert in batches
+    // Fetch and insert in batches (memory efficient!)
     while (hasNextPage) {
       const url = pageInfo 
-        ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
-        : `https://${storeName}/admin/api/2024-01/products.json?limit=250`;
-        
+        ? `https://${storeName}.myshopify.com/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
+        : `https://${storeName}.myshopify.com/admin/api/2024-01/products.json?limit=250`;
+
       const response = await fetch(url, {
         headers: {
           'X-Shopify-Access-Token': accessToken,
           'Content-Type': 'application/json'
         }
       });
-      
+
       if (!response.ok) {
-        throw new Error('Failed to fetch products from Shopify');
+        throw new Error(`Shopify API error: ${response.status}`);
       }
-      
+
       const data = await response.json();
-      pageCount++;
+      const products = data.products || [];
       
-      // Insert this batch immediately (with title filter!)
-      for (const product of data.products) {
-        // CHECK: Skip products with improperly formatted titles
+      pageCount++;
+      console.log(`📦 Fetched page ${pageCount}: ${products.length} products`);
+
+      // Filter and insert products immediately (don't store in memory)
+      for (const product of products) {
+        // Skip if title is not properly formatted
         if (!isProperlyFormatted(product.title)) {
           totalSkipped++;
-          continue; // Skip this product entirely
+          continue;
         }
-        
-        for (const variant of product.variants || []) {
+
+        for (const variant of product.variants) {
           try {
             await pool.query(`
               INSERT INTO products (
-                variant_id, product_id, title, variant_title, barcode, sku,
-                price, compare_at_price, cost, inventory_quantity,
+                variant_id, product_id, title, variant_title, barcode, sku, 
+                price, compare_at_price, cost, inventory_quantity, 
                 created_at, updated_at
               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-              ON CONFLICT (variant_id) DO UPDATE SET
-                product_id = EXCLUDED.product_id,
+              ON CONFLICT (variant_id) 
+              DO UPDATE SET
                 title = EXCLUDED.title,
                 variant_title = EXCLUDED.variant_title,
                 barcode = EXCLUDED.barcode,
@@ -150,254 +152,261 @@ async function importProducts(storeName, accessToken) {
               variant.id,
               product.id,
               product.title,
-              variant.title,
+              variant.title !== 'Default Title' ? variant.title : null,
               variant.barcode || null,
               variant.sku || null,
-              parseFloat(variant.price),
-              parseFloat(variant.compare_at_price || 0),
-              parseFloat(variant.compare_at_price || variant.price * 0.5),
+              parseFloat(variant.price) || 0,
+              variant.compare_at_price ? parseFloat(variant.compare_at_price) : null,
+              variant.inventory_management ? parseFloat(variant.price) * 0.6 : null,
               variant.inventory_quantity || 0,
               product.created_at,
               product.updated_at
             ]);
+            
             totalInserted++;
-          } catch (error) {
-            console.error(`Error inserting variant ${variant.id}:`, error.message);
+          } catch (err) {
+            console.error(`❌ Error inserting variant ${variant.id}:`, err.message);
           }
         }
       }
-      
-      if (pageCount % 10 === 0) {
-        console.log(`  Page ${pageCount}: ✅ ${totalInserted} imported, ⏭️ ${totalSkipped} skipped (ALL CAPS)`);
-      }
-      
-      const linkHeader = response.headers.get('link');
+
+      console.log(`✅ Page ${pageCount}: ${totalInserted} inserted, ${totalSkipped} skipped (ALL CAPS)`);
+
+      // Check for next page
+      const linkHeader = response.headers.get('Link');
       if (linkHeader && linkHeader.includes('rel="next"')) {
-        const match = linkHeader.match(/page_info=([^&>]+)/);
-        pageInfo = match ? match[1] : null;
+        const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)>;\s*rel="next"/);
+        pageInfo = nextMatch ? nextMatch[1] : null;
+        hasNextPage = !!pageInfo;
       } else {
         hasNextPage = false;
       }
-      
-      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Small delay to avoid rate limits
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
 
-    console.log(`✅ Imported ${totalInserted} product variants`);
-    console.log(`⏭️ Skipped ${totalSkipped} products (ALL CAPS titles)`);
-    return totalInserted;
-    
+    console.log(`✅ Import complete! ${totalInserted} products inserted, ${totalSkipped} skipped (ALL CAPS)`);
+    return { 
+      success: true, 
+      message: `Successfully imported ${totalInserted} products (${totalSkipped} skipped due to ALL CAPS titles)`,
+      total: totalInserted,
+      skipped: totalSkipped
+    };
+
   } catch (error) {
-    console.error('❌ Product import error:', error);
+    console.error('❌ Import failed:', error);
     throw error;
   }
 }
 
-// Fetch sales data from Shopify Orders API
+// Import sales data from Shopify Orders API
 async function importSalesData(storeName, accessToken) {
-  console.log('🔄 Starting sales data import from Shopify Orders...');
+  console.log('📊 Starting sales data import from Shopify Orders...');
   
   try {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
     let allOrders = [];
     let hasNextPage = true;
     let pageInfo = null;
-    let pageCount = 0;
 
-    // Get orders from last 30 days
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const dateFilter = thirtyDaysAgo.toISOString();
-
-    while (hasNextPage && pageCount < 20) { // Limit to 5000 orders (20 pages)
+    while (hasNextPage) {
       const url = pageInfo 
-        ? `https://${storeName}/admin/api/2024-01/orders.json?limit=250&status=any&page_info=${pageInfo}`
-        : `https://${storeName}/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${dateFilter}`;
-        
+        ? `https://${storeName}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${thirtyDaysAgo.toISOString()}&page_info=${pageInfo}`
+        : `https://${storeName}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${thirtyDaysAgo.toISOString()}`;
+
       const response = await fetch(url, {
         headers: {
           'X-Shopify-Access-Token': accessToken,
           'Content-Type': 'application/json'
         }
       });
-      
+
       if (!response.ok) {
-        throw new Error('Failed to fetch orders from Shopify');
+        throw new Error(`Shopify Orders API error: ${response.status}`);
       }
-      
+
       const data = await response.json();
-      allOrders = allOrders.concat(data.orders);
-      pageCount++;
-      
-      console.log(`  Fetched page ${pageCount}: ${allOrders.length} orders so far...`);
-      
-      const linkHeader = response.headers.get('link');
+      allOrders = allOrders.concat(data.orders || []);
+
+      const linkHeader = response.headers.get('Link');
       if (linkHeader && linkHeader.includes('rel="next"')) {
-        const match = linkHeader.match(/page_info=([^&>]+)/);
-        pageInfo = match ? match[1] : null;
+        const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)>;\s*rel="next"/);
+        pageInfo = nextMatch ? nextMatch[1] : null;
+        hasNextPage = !!pageInfo;
       } else {
         hasNextPage = false;
       }
-      
-      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
-    console.log(`✅ Fetched ${allOrders.length} orders from last 30 days`);
-    console.log('📊 Calculating sales velocity...');
+    console.log(`📦 Fetched ${allOrders.length} orders from last 30 days`);
 
-    // Count sales per variant
-    const salesCount = {};
-    for (const order of allOrders) {
-      for (const item of order.line_items || []) {
+    const salesByVariant = {};
+    
+    allOrders.forEach(order => {
+      order.line_items?.forEach(item => {
         const variantId = item.variant_id;
         if (variantId) {
-          salesCount[variantId] = (salesCount[variantId] || 0) + item.quantity;
+          salesByVariant[variantId] = (salesByVariant[variantId] || 0) + item.quantity;
         }
-      }
+      });
+    });
+
+    for (const [variantId, quantity] of Object.entries(salesByVariant)) {
+      await pool.query(`
+        INSERT INTO sales_data (variant_id, monthly_sales, last_updated)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (variant_id) 
+        DO UPDATE SET 
+          monthly_sales = $2,
+          last_updated = NOW()
+      `, [variantId, quantity]);
     }
 
-    // Clear existing sales data
-    await pool.query('TRUNCATE TABLE sales_data');
+    console.log(`✅ Sales data imported for ${Object.keys(salesByVariant).length} variants`);
+    return { success: true, message: 'Sales data imported successfully' };
 
-    // Insert sales data
-    let insertCount = 0;
-    for (const [variantId, quantity] of Object.entries(salesCount)) {
-      try {
-        await pool.query(`
-          INSERT INTO sales_data (variant_id, monthly_sales, last_updated)
-          VALUES ($1, $2, NOW())
-          ON CONFLICT (variant_id) DO UPDATE SET
-            monthly_sales = EXCLUDED.monthly_sales,
-            last_updated = NOW()
-        `, [parseInt(variantId), quantity]);
-        insertCount++;
-      } catch (error) {
-        console.error(`Error inserting sales for variant ${variantId}:`, error.message);
-      }
-    }
-
-    console.log(`✅ Imported sales data for ${insertCount} products`);
-    return insertCount;
-    
   } catch (error) {
-    console.error('❌ Sales import error:', error);
+    console.error('❌ Sales import failed:', error);
     throw error;
   }
 }
 
-// API Routes
-app.get('/api/shopify', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT COUNT(*) as count FROM products');
-    const count = parseInt(result.rows[0].count);
-    
-    res.json({ 
-      status: 'Backend is alive!',
-      database: 'connected',
-      productsInDatabase: count
-    });
-  } catch (error) {
-    res.json({ 
-      status: 'Backend is alive!',
-      database: 'error',
-      error: error.message
-    });
-  }
+// API Endpoints
+
+// Health check
+app.get('/', (req, res) => {
+  res.json({ status: 'Planogram Backend Running', timestamp: new Date().toISOString() });
 });
 
+// Shopify operations endpoint
 app.post('/api/shopify', async (req, res) => {
-  const { storeName, accessToken, action, upc } = req.body || {};
-  
+  const { storeName, accessToken, action } = req.body;
+
+  if (!storeName || !accessToken) {
+    return res.status(400).json({ error: 'Store name and access token required' });
+  }
+
   try {
-    if (action === 'test') {
-      const response = await fetch(`https://${storeName}/admin/api/2024-01/shop.json`, {
+    if (action === 'connect') {
+      const testUrl = `https://${storeName}.myshopify.com/admin/api/2024-01/shop.json`;
+      const response = await fetch(testUrl, {
         headers: {
           'X-Shopify-Access-Token': accessToken,
           'Content-Type': 'application/json'
         }
       });
-      
+
       if (!response.ok) {
-        return res.status(response.status).json({ error: 'Shopify API error' });
+        return res.status(401).json({ error: 'Invalid Shopify credentials' });
       }
-      
+
       const data = await response.json();
-      
-      return res.json({ 
+      res.json({ 
         success: true, 
-        shopName: data.shop.name,
-        message: 'Connected! Use "Refresh Cache" to import products.'
+        shop: data.shop.name,
+        message: 'Connected to Shopify successfully'
       });
+
+    } else if (action === 'refreshCache') {
+      console.log('🔄 Manual cache refresh requested');
+      
+      await importProducts(storeName, accessToken);
+      await importSalesData(storeName, accessToken);
+      
+      const countResult = await pool.query('SELECT COUNT(*) as count FROM products');
+      const productCount = parseInt(countResult.rows[0].count);
+      
+      res.json({ 
+        success: true, 
+        message: `Cache refreshed! ${productCount} products in database`,
+        productCount
+      });
+
+    } else {
+      res.status(400).json({ error: 'Invalid action' });
     }
 
-    if (action === 'refreshCache') {
-      console.log('📦 Full sync requested: Products + Sales Data');
-      
-      // Import products
-      const productCount = await importProducts(storeName, accessToken);
-      
-      // Import sales data
-      const salesCount = await importSalesData(storeName, accessToken);
-      
-      return res.json({ 
-        success: true, 
-        message: 'Database synced successfully',
-        productsLoaded: productCount,
-        salesDataLoaded: salesCount
-      });
-    }
-    
-    if (action === 'getProduct' && upc) {
-      const searchUPC = String(upc).trim();
-      
-      console.log(`🔍 Searching database for UPC: "${searchUPC}"`);
-      
-      const result = await pool.query(`
-        SELECT p.*, s.monthly_sales
-        FROM products p
-        LEFT JOIN sales_data s ON p.variant_id = s.variant_id
-        WHERE p.barcode = $1
-        LIMIT 1
-      `, [searchUPC]);
-      
-      if (result.rows.length > 0) {
-        const product = result.rows[0];
-        console.log(`✅ Found product: ${product.title}`);
-        
-        return res.json({
-          success: true,
-          product: {
-            name: `${product.title}${product.variant_title && product.variant_title !== 'Default Title' ? ' - ' + product.variant_title : ''}`,
-            price: parseFloat(product.price),
-            cost: parseFloat(product.cost || product.price * 0.5),
-            monthlySales: product.monthly_sales || 0,
-            sku: product.sku
-          }
-        });
-      }
-      
-      console.log(`❌ No product found with barcode: "${searchUPC}"`);
-      
-      return res.status(404).json({ 
-        error: 'Product not found in database',
-        hint: 'Click "Refresh Cache" to sync latest products from Shopify'
-      });
-    }
-    
-    return res.json({ message: 'Backend ready' });
-    
   } catch (error) {
-    console.error('Error:', error);
-    return res.status(500).json({ error: error.message });
+    console.error('❌ API Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// UPC lookup endpoint
+app.get('/api/product/:upc', async (req, res) => {
+  const { upc } = req.params;
+  
+  console.log(`🔍 Searching database for UPC: "${upc}"`);
+
+  try {
+    const result = await pool.query(`
+      SELECT 
+        p.*,
+        COALESCE(s.monthly_sales, 0) as monthly_sales
+      FROM products p
+      LEFT JOIN sales_data s ON p.variant_id = s.variant_id
+      WHERE p.barcode = $1
+      LIMIT 1
+    `, [upc]);
+
+    if (result.rows.length === 0) {
+      console.log(`❌ No product found with barcode: "${upc}"`);
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const product = result.rows[0];
+    console.log(`✅ Found product: ${product.title}`);
+
+    res.json({
+      title: product.title,
+      variantTitle: product.variant_title,
+      price: parseFloat(product.price),
+      cost: product.cost ? parseFloat(product.cost) : parseFloat(product.price) * 0.6,
+      monthlySales: parseInt(product.monthly_sales) || 0,
+      barcode: product.barcode,
+      sku: product.sku,
+      inventoryQuantity: product.inventory_quantity
+    });
+
+  } catch (error) {
+    console.error('❌ Database error:', error);
+    res.status(500).json({ error: 'Database query failed' });
+  }
+});
+
+// Database stats endpoint
+app.get('/api/stats', async (req, res) => {
+  try {
+    const productCount = await pool.query('SELECT COUNT(*) as count FROM products');
+    const salesCount = await pool.query('SELECT COUNT(*) as count FROM sales_data');
+    
+    res.json({
+      products: parseInt(productCount.rows[0].count),
+      salesTracked: parseInt(salesCount.rows[0].count)
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
 // Initialize and start server
 async function startServer() {
   await initDatabase();
-  
   app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📊 Database connected`);
   });
 }
+
+// Test database connection
+pool.query('SELECT NOW()', (err, res) => {
+  if (err) {
+    console.error('❌ Database connection failed:', err);
+  } else {
+    console.log('📊 Database connected');
+  }
+});
 
 startServer();
