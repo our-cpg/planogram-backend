@@ -138,6 +138,17 @@ async function importProducts(storeName, accessToken) {
                 price, compare_at_price, cost, inventory_quantity,
                 created_at, updated_at
               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+              ON CONFLICT (variant_id) DO UPDATE SET
+                product_id = EXCLUDED.product_id,
+                title = EXCLUDED.title,
+                variant_title = EXCLUDED.variant_title,
+                barcode = EXCLUDED.barcode,
+                sku = EXCLUDED.sku,
+                price = EXCLUDED.price,
+                compare_at_price = EXCLUDED.compare_at_price,
+                cost = EXCLUDED.cost,
+                inventory_quantity = EXCLUDED.inventory_quantity,
+                updated_at = EXCLUDED.updated_at
             `, [
               variant.id,
               product.id,
