@@ -141,22 +141,64 @@ app.post('/api/shopify', async (req, res) => {
         await new Promise(resolve => setTimeout(resolve, 3000));
       }
       
-      for (const product of productCache) {
-        for (const variant of product.variants || []) {
-          if (String(variant.barcode || '').trim() === searchUPC) {
-            return res.json({
-              success: true,
-              product: {
-                name: `${product.title}${variant.title !== 'Default Title' ? ' - ' + variant.title : ''}`,
-                price: parseFloat(variant.price),
-                cost: parseFloat(variant.compare_at_price || variant.price * 0.5),
-                monthlySales: Math.floor(Math.random() * 200) + 50,
-                sku: variant.sku
-              }
-            });
-          }
-        }
+      if (action === 'getProduct' && upc) {
+  const searchUPC = String(upc).trim();
+  
+  console.log(`\n🔍 Searching for UPC: "${searchUPC}"`);
+  console.log(`📦 Cache size: ${productCache.length} products`);
+  
+  if (productCache.length === 0 && cacheStatus === 'loading') {
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+  
+  // Debug: Check first 5 products to see barcode format
+  console.log('\n📋 Sample barcodes from first 5 products:');
+  for (let i = 0; i < Math.min(5, productCache.length); i++) {
+    const product = productCache[i];
+    console.log(`  Product: ${product.title}`);
+    for (const variant of product.variants || []) {
+      console.log(`    Variant barcode: "${variant.barcode}" (type: ${typeof variant.barcode})`);
+    }
+  }
+  
+  let foundMatch = false;
+  for (const product of productCache) {
+    for (const variant of product.variants || []) {
+      const variantBarcode = String(variant.barcode || '').trim();
+      
+      // Log if we find a partial match
+      if (variantBarcode.includes(searchUPC) || searchUPC.includes(variantBarcode)) {
+        console.log(`⚠️ Partial match found!`);
+        console.log(`  Product: ${product.title}`);
+        console.log(`  Searched: "${searchUPC}"`);
+        console.log(`  Found: "${variantBarcode}"`);
       }
+      
+      if (variantBarcode === searchUPC) {
+        console.log(`✅ EXACT MATCH FOUND!`);
+        foundMatch = true;
+        return res.json({
+          success: true,
+          product: {
+            name: `${product.title}${variant.title !== 'Default Title' ? ' - ' + variant.title : ''}`,
+            price: parseFloat(variant.price),
+            cost: parseFloat(variant.compare_at_price || variant.price * 0.5),
+            monthlySales: Math.floor(Math.random() * 200) + 50,
+            sku: variant.sku
+          }
+        });
+      }
+    }
+  }
+  
+  console.log(`❌ No match found for UPC: "${searchUPC}"\n`);
+  
+  return res.status(404).json({ 
+    error: 'Product not found in cache',
+    searchedProducts: productCache.length,
+    hint: 'All products cached. If product not found, refresh cache.'
+  });
+}
       
       return res.status(404).json({ 
         error: 'Product not found in cache',
