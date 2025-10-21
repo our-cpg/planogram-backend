@@ -98,11 +98,19 @@ async function importProducts(storeName, accessToken) {
       return true;
     };
 
+    // Helper function to clean store name
+    const cleanStoreName = (name) => {
+      // Remove .myshopify.com if it's already included
+      return name.replace('.myshopify.com', '');
+    };
+
+    const storeNameClean = cleanStoreName(storeName);
+
     // Fetch and insert in batches (memory efficient!)
     while (hasNextPage) {
       const url = pageInfo 
-        ? `https://${storeName}.myshopify.com/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
-        : `https://${storeName}.myshopify.com/admin/api/2024-01/products.json?limit=250`;
+        ? `https://${storeNameClean}.myshopify.com/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
+        : `https://${storeNameClean}.myshopify.com/admin/api/2024-01/products.json?limit=250`;
 
       const response = await fetch(url, {
         headers: {
@@ -212,10 +220,13 @@ async function importSalesData(storeName, accessToken) {
     let hasNextPage = true;
     let pageInfo = null;
 
+    // Clean store name (remove .myshopify.com if present)
+    const storeNameClean = storeName.replace('.myshopify.com', '');
+
     while (hasNextPage) {
       const url = pageInfo 
-        ? `https://${storeName}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${thirtyDaysAgo.toISOString()}&page_info=${pageInfo}`
-        : `https://${storeName}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${thirtyDaysAgo.toISOString()}`;
+        ? `https://${storeNameClean}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${thirtyDaysAgo.toISOString()}&page_info=${pageInfo}`
+        : `https://${storeNameClean}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${thirtyDaysAgo.toISOString()}`;
 
       const response = await fetch(url, {
         headers: {
@@ -291,7 +302,9 @@ app.post('/api/shopify', async (req, res) => {
 
   try {
     if (action === 'connect') {
-      const testUrl = `https://${storeName}.myshopify.com/admin/api/2024-01/shop.json`;
+      // Clean store name (remove .myshopify.com if present)
+      const storeNameClean = storeName.replace('.myshopify.com', '');
+      const testUrl = `https://${storeNameClean}.myshopify.com/admin/api/2024-01/shop.json`;
       const response = await fetch(testUrl, {
         headers: {
           'X-Shopify-Access-Token': accessToken,
