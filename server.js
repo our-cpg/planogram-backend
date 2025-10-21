@@ -33,11 +33,14 @@ app.use(express.json());
 // Initialize database tables
 async function initDatabase() {
   try {
+    // Drop existing table to recreate with new schema
+    await pool.query(`DROP TABLE IF EXISTS products CASCADE`);
+    
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
-        id BIGINT PRIMARY KEY,
+        variant_id BIGINT PRIMARY KEY,
+        product_id BIGINT NOT NULL,
         title TEXT NOT NULL,
-        variant_id BIGINT NOT NULL,
         variant_title TEXT,
         barcode TEXT,
         sku TEXT,
@@ -131,14 +134,14 @@ async function importProducts(storeName, accessToken) {
           try {
             await pool.query(`
               INSERT INTO products (
-                id, title, variant_id, variant_title, barcode, sku,
+                variant_id, product_id, title, variant_title, barcode, sku,
                 price, compare_at_price, cost, inventory_quantity,
                 created_at, updated_at
               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             `, [
               variant.id,
+              product.id,
               product.title,
-              variant.id,
               variant.title,
               variant.barcode || null,
               variant.sku || null,
