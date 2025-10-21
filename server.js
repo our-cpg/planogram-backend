@@ -68,17 +68,38 @@ async function initDatabase() {
   }
 }
 
-// Import products from Shopify
+// Import products from Shopify (MEMORY EFFICIENT + TITLE FILTER)
 async function importProducts(storeName, accessToken) {
   console.log('🔄 Starting product import from Shopify...');
+  console.log('📋 Filtering: Only products with proper title case (not ALL CAPS)');
   
   try {
-    let allProducts = [];
     let hasNextPage = true;
     let pageInfo = null;
     let pageCount = 0;
+    let totalInserted = 0;
+    let totalSkipped = 0;
 
-    // Fetch all products
+    // Clear existing products first
+    await pool.query('TRUNCATE TABLE products CASCADE');
+    console.log('🗑️ Cleared existing products');
+
+    // Helper function to check if title is properly formatted
+    const isProperlyFormatted = (title) => {
+      // Skip if title is all uppercase (like "WAVING BUTTER POMADE")
+      if (title === title.toUpperCase()) {
+        return false;
+      }
+      
+      // Must have at least one lowercase letter (like "Waving Butter Pomade")
+      if (!/[a-z]/.test(title)) {
+        return false;
+      }
+      
+      return true;
+    };
+
+    // Fetch and insert in batches
     while (hasNextPage) {
       const url = pageInfo 
         ? `https://${storeName}/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
@@ -96,10 +117,48 @@ async function importProducts(storeName, accessToken) {
       }
       
       const data = await response.json();
-      allProducts = allProducts.concat(data.products);
       pageCount++;
       
-      console.log(`  Fetched page ${pageCount}: ${allProducts.length} products so far...`);
+      // Insert this batch immediately (with title filter!)
+      for (const product of data.products) {
+        // CHECK: Skip products with improperly formatted titles
+        if (!isProperlyFormatted(product.title)) {
+          totalSkipped++;
+          continue; // Skip this product entirely
+        }
+        
+        for (const variant of product.variants || []) {
+          try {
+            await pool.query(`
+              INSERT INTO products (
+                id, title, variant_id, variant_title, barcode, sku,
+                price, compare_at_price, cost, inventory_quantity,
+                created_at, updated_at
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            `, [
+              variant.id,
+              product.title,
+              variant.id,
+              variant.title,
+              variant.barcode || null,
+              variant.sku || null,
+              parseFloat(variant.price),
+              parseFloat(variant.compare_at_price || 0),
+              parseFloat(variant.compare_at_price || variant.price * 0.5),
+              variant.inventory_quantity || 0,
+              product.created_at,
+              product.updated_at
+            ]);
+            totalInserted++;
+          } catch (error) {
+            console.error(`Error inserting variant ${variant.id}:`, error.message);
+          }
+        }
+      }
+      
+      if (pageCount % 10 === 0) {
+        console.log(`  Page ${pageCount}: ✅ ${totalInserted} imported, ⏭️ ${totalSkipped} skipped (ALL CAPS)`);
+      }
       
       const linkHeader = response.headers.get('link');
       if (linkHeader && linkHeader.includes('rel="next"')) {
@@ -112,51 +171,9 @@ async function importProducts(storeName, accessToken) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
 
-    console.log(`✅ Fetched ${allProducts.length} products from Shopify`);
-    console.log('💾 Saving to database...');
-
-    // Clear existing products
-    await pool.query('TRUNCATE TABLE products CASCADE');
-
-    // Insert products into database
-    let insertCount = 0;
-    for (const product of allProducts) {
-      for (const variant of product.variants || []) {
-        try {
-          await pool.query(`
-            INSERT INTO products (
-              id, title, variant_id, variant_title, barcode, sku,
-              price, compare_at_price, cost, inventory_quantity,
-              created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            ON CONFLICT (id) DO UPDATE SET
-              title = EXCLUDED.title,
-              barcode = EXCLUDED.barcode,
-              price = EXCLUDED.price,
-              updated_at = EXCLUDED.updated_at
-          `, [
-            variant.id,
-            product.title,
-            variant.id,
-            variant.title,
-            variant.barcode || null,
-            variant.sku || null,
-            parseFloat(variant.price),
-            parseFloat(variant.compare_at_price || 0),
-            parseFloat(variant.compare_at_price || variant.price * 0.5),
-            variant.inventory_quantity || 0,
-            product.created_at,
-            product.updated_at
-          ]);
-          insertCount++;
-        } catch (error) {
-          console.error(`Error inserting variant ${variant.id}:`, error.message);
-        }
-      }
-    }
-
-    console.log(`✅ Imported ${insertCount} product variants into database`);
-    return insertCount;
+    console.log(`✅ Imported ${totalInserted} product variants`);
+    console.log(`⏭️ Skipped ${totalSkipped} products (ALL CAPS titles)`);
+    return totalInserted;
     
   } catch (error) {
     console.error('❌ Product import error:', error);
