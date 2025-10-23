@@ -6,7 +6,7 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const { Pool } = pg;
 
-// Database connection
+// Database connection - SAME AS YOUR ORIGINAL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -14,7 +14,7 @@ const pool = new Pool({
   }
 });
 
-// CORS middleware
+// CORS middleware - SAME AS YOUR ORIGINAL
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
@@ -30,9 +30,13 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// Initialize database tables
+// Initialize database tables with SAFE error handling
 async function initDatabase() {
+  console.log('🔄 Initializing database...');
+  
   try {
+    // Create products table
+    console.log('📦 Creating products table...');
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         variant_id BIGINT PRIMARY KEY,
@@ -49,12 +53,19 @@ async function initDatabase() {
         updated_at TIMESTAMP
       );
     `);
+    console.log('✅ Products table ready');
 
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_barcode ON products(barcode);
-    `);
+    // Create index
+    console.log('📑 Creating barcode index...');
+    try {
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_barcode ON products(barcode);`);
+      console.log('✅ Index ready');
+    } catch (err) {
+      console.log('⚠️ Index already exists or error:', err.message);
+    }
 
-    // UPDATED: Add columns for different time periods
+    // Create sales_data table with ALL columns
+    console.log('📊 Creating sales_data table...');
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sales_data (
         variant_id BIGINT PRIMARY KEY,
@@ -67,24 +78,38 @@ async function initDatabase() {
         last_updated TIMESTAMP DEFAULT NOW()
       );
     `);
+    console.log('✅ Sales_data table ready');
 
-    // Add new columns to existing table if they don't exist
-    await pool.query(`
-      ALTER TABLE sales_data 
-      ADD COLUMN IF NOT EXISTS daily_sales INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS weekly_sales INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS quarterly_sales INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS yearly_sales INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS all_time_sales INTEGER DEFAULT 0;
-    `);
+    // Try to add new columns (in case table exists from old version)
+    console.log('🔧 Checking for new columns...');
+    const columnsToAdd = [
+      'daily_sales',
+      'weekly_sales', 
+      'quarterly_sales',
+      'yearly_sales',
+      'all_time_sales'
+    ];
 
-    console.log('✅ Database tables initialized');
+    for (const column of columnsToAdd) {
+      try {
+        await pool.query(`
+          ALTER TABLE sales_data 
+          ADD COLUMN IF NOT EXISTS ${column} INTEGER DEFAULT 0;
+        `);
+        console.log(`✅ Column ${column} ready`);
+      } catch (err) {
+        console.log(`⚠️ Column ${column} might already exist:`, err.message);
+      }
+    }
+
+    console.log('✅✅✅ Database initialization complete!');
   } catch (error) {
     console.error('❌ Database init error:', error);
+    console.error('Stack:', error.stack);
   }
 }
 
-// Import products from Shopify (MEMORY EFFICIENT + TITLE FILTER)
+// Your original import products function
 async function importProducts(storeName, accessToken) {
   console.log('🔄 Starting product import from Shopify...');
   console.log('📋 Filtering: Only products with proper title case (not ALL CAPS)');
@@ -219,7 +244,6 @@ async function importSalesData(storeName, accessToken) {
     
     const storeNameClean = storeName.replace('.myshopify.com', '');
 
-    // Fetch all orders from the past year (to get all-time data)
     let allOrders = [];
     let hasNextPage = true;
     let pageInfo = null;
@@ -257,7 +281,6 @@ async function importSalesData(storeName, accessToken) {
         hasNextPage = false;
       }
 
-      // Small delay to avoid rate limits
       await new Promise(resolve => setTimeout(resolve, 500));
     }
 
@@ -297,50 +320,46 @@ async function importSalesData(storeName, accessToken) {
 
     console.log(`📊 Processing sales data for ${Object.keys(salesByVariant).length} variants...`);
 
-    // Insert/update sales data
     let updated = 0;
     for (const [variantId, sales] of Object.entries(salesByVariant)) {
-      await pool.query(`
-        INSERT INTO sales_data (
-          variant_id, 
-          daily_sales, 
-          weekly_sales, 
-          monthly_sales, 
-          quarterly_sales, 
-          yearly_sales, 
-          all_time_sales,
-          last_updated
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-        ON CONFLICT (variant_id) 
-        DO UPDATE SET 
-          daily_sales = $2,
-          weekly_sales = $3,
-          monthly_sales = $4,
-          quarterly_sales = $5,
-          yearly_sales = $6,
-          all_time_sales = $7,
-          last_updated = NOW()
-      `, [
-        variantId, 
-        sales.daily, 
-        sales.weekly, 
-        sales.monthly, 
-        sales.quarterly, 
-        sales.yearly, 
-        sales.allTime
-      ]);
-      updated++;
+      try {
+        await pool.query(`
+          INSERT INTO sales_data (
+            variant_id, 
+            daily_sales, 
+            weekly_sales, 
+            monthly_sales, 
+            quarterly_sales, 
+            yearly_sales, 
+            all_time_sales,
+            last_updated
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+          ON CONFLICT (variant_id) 
+          DO UPDATE SET 
+            daily_sales = $2,
+            weekly_sales = $3,
+            monthly_sales = $4,
+            quarterly_sales = $5,
+            yearly_sales = $6,
+            all_time_sales = $7,
+            last_updated = NOW()
+        `, [
+          variantId, 
+          sales.daily, 
+          sales.weekly, 
+          sales.monthly, 
+          sales.quarterly, 
+          sales.yearly, 
+          sales.allTime
+        ]);
+        updated++;
+      } catch (err) {
+        console.error(`❌ Error updating sales for variant ${variantId}:`, err.message);
+      }
     }
 
     console.log(`✅ Sales data imported for ${updated} variants`);
-    console.log(`📊 Breakdown:`);
-    console.log(`   - Daily sales tracked`);
-    console.log(`   - Weekly sales tracked`);
-    console.log(`   - Monthly sales tracked`);
-    console.log(`   - Quarterly sales tracked`);
-    console.log(`   - Yearly sales tracked`);
-    console.log(`   - All-time sales tracked`);
     
     return { 
       success: true, 
@@ -350,6 +369,7 @@ async function importSalesData(storeName, accessToken) {
 
   } catch (error) {
     console.error('❌ Sales import failed:', error);
+    console.error('Stack:', error.stack);
     throw error;
   }
 }
@@ -357,11 +377,17 @@ async function importSalesData(storeName, accessToken) {
 // API Endpoints
 
 app.get('/', (req, res) => {
-  res.json({ status: 'Planogram Backend Running', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'Planogram Backend Running - SALES TRACKING ENABLED', 
+    timestamp: new Date().toISOString(),
+    version: '2.0-sales-tracking'
+  });
 });
 
 app.post('/api/shopify', async (req, res) => {
   const { storeName, accessToken, action } = req.body;
+
+  console.log(`📥 API Request: ${action}`);
 
   if (!storeName || !accessToken) {
     return res.status(400).json({ error: 'Store name and access token required' });
@@ -371,6 +397,9 @@ app.post('/api/shopify', async (req, res) => {
     if (action === 'connect') {
       const storeNameClean = storeName.replace('.myshopify.com', '');
       const testUrl = `https://${storeNameClean}.myshopify.com/admin/api/2024-01/shop.json`;
+      
+      console.log(`🔌 Testing connection to ${storeNameClean}...`);
+      
       const response = await fetch(testUrl, {
         headers: {
           'X-Shopify-Access-Token': accessToken,
@@ -379,10 +408,13 @@ app.post('/api/shopify', async (req, res) => {
       });
 
       if (!response.ok) {
+        console.error(`❌ Connection failed: ${response.status}`);
         return res.status(401).json({ error: 'Invalid Shopify credentials' });
       }
 
       const data = await response.json();
+      console.log(`✅ Connected to shop: ${data.shop.name}`);
+      
       res.json({ 
         success: true, 
         shop: data.shop.name,
@@ -390,17 +422,22 @@ app.post('/api/shopify', async (req, res) => {
       });
 
     } else if (action === 'refreshCache') {
-      console.log('🔄 Manual cache refresh requested');
+      console.log('🔄 REFRESH CACHE REQUESTED - This will take 2-5 minutes...');
       
+      console.log('Step 1/2: Importing products...');
       await importProducts(storeName, accessToken);
+      
+      console.log('Step 2/2: Importing sales data...');
       await importSalesData(storeName, accessToken);
       
       const countResult = await pool.query('SELECT COUNT(*) as count FROM products');
       const productCount = parseInt(countResult.rows[0].count);
       
+      console.log(`✅✅✅ REFRESH COMPLETE! ${productCount} products with sales data ready`);
+      
       res.json({ 
         success: true, 
-        message: `Cache refreshed! ${productCount} products in database`,
+        message: `Cache refreshed! ${productCount} products with sales data`,
         productCount
       });
 
@@ -410,7 +447,8 @@ app.post('/api/shopify', async (req, res) => {
 
   } catch (error) {
     console.error('❌ API Error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Stack:', error.stack);
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
@@ -418,7 +456,7 @@ app.post('/api/shopify', async (req, res) => {
 app.get('/api/product/:upc', async (req, res) => {
   const { upc } = req.params;
   
-  console.log(`🔍 Searching database for UPC: "${upc}"`);
+  console.log(`🔍 Searching for UPC: "${upc}"`);
 
   try {
     const result = await pool.query(`
@@ -442,8 +480,8 @@ app.get('/api/product/:upc', async (req, res) => {
     }
 
     const product = result.rows[0];
-    console.log(`✅ Found product: ${product.title}`);
-    console.log(`📊 Sales: Daily=${product.daily_sales}, Weekly=${product.weekly_sales}, Monthly=${product.monthly_sales}`);
+    console.log(`✅ Found: ${product.title}`);
+    console.log(`📊 Sales: Day=${product.daily_sales}, Week=${product.weekly_sales}, Month=${product.monthly_sales}`);
 
     res.json({
       title: product.title,
@@ -463,7 +501,8 @@ app.get('/api/product/:upc', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Database error:', error);
-    res.status(500).json({ error: 'Database query failed' });
+    console.error('Stack:', error.stack);
+    res.status(500).json({ error: 'Database query failed', details: error.message });
   }
 });
 
@@ -479,14 +518,18 @@ app.get('/api/stats', async (req, res) => {
       totalMonthlySales: parseInt(totalSales.rows[0].total) || 0
     });
   } catch (error) {
+    console.error('❌ Stats error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 async function startServer() {
+  console.log('🚀 Starting Planogram Backend v2.0 (Sales Tracking)...');
   await initDatabase();
   app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`📊 Sales tracking: ENABLED`);
+    console.log(`🔗 Test at: http://localhost:${PORT}`);
   });
 }
 
@@ -494,7 +537,8 @@ pool.query('SELECT NOW()', (err, res) => {
   if (err) {
     console.error('❌ Database connection failed:', err);
   } else {
-    console.log('📊 Database connected');
+    console.log('✅ Database connected successfully');
+    console.log(`📅 Server time: ${res.rows[0].now}`);
   }
 });
 
