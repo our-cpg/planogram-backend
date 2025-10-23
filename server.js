@@ -114,6 +114,83 @@ async function initDatabase() {
     }
 
     console.log('✅✅✅ Database initialization complete!');
+    
+    // 🔥 NEW: Create orders table for full order tracking
+    console.log('🛒 Creating orders table...');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS orders (
+        order_id BIGINT PRIMARY KEY,
+        order_number TEXT,
+        customer_id BIGINT,
+        customer_email_hash TEXT,
+        total_price DECIMAL(10,2),
+        subtotal_price DECIMAL(10,2),
+        total_tax DECIMAL(10,2),
+        order_date TIMESTAMP,
+        is_returning_customer BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ Orders table ready');
+
+    // Create order_items table for product sequences
+    console.log('📦 Creating order_items table...');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS order_items (
+        id SERIAL PRIMARY KEY,
+        order_id BIGINT NOT NULL,
+        variant_id BIGINT NOT NULL,
+        product_id BIGINT NOT NULL,
+        quantity INTEGER,
+        price DECIMAL(10,2),
+        cart_position INTEGER,
+        created_at TIMESTAMP DEFAULT NOW(),
+        FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE
+      );
+    `);
+    console.log('✅ Order_items table ready');
+
+    // Create customer_stats table
+    console.log('👥 Creating customer_stats table...');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS customer_stats (
+        customer_id BIGINT PRIMARY KEY,
+        customer_email_hash TEXT,
+        order_count INTEGER DEFAULT 0,
+        total_spent DECIMAL(10,2) DEFAULT 0,
+        average_order_value DECIMAL(10,2) DEFAULT 0,
+        first_order_date TIMESTAMP,
+        last_order_date TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ Customer_stats table ready');
+
+    // Create product_correlations table for "bought together" analysis
+    console.log('🤝 Creating product_correlations table...');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_correlations (
+        id SERIAL PRIMARY KEY,
+        product_a_id BIGINT NOT NULL,
+        product_b_id BIGINT NOT NULL,
+        co_purchase_count INTEGER DEFAULT 0,
+        correlation_score DECIMAL(5,4),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(product_a_id, product_b_id)
+      );
+    `);
+    console.log('✅ Product_correlations table ready');
+
+    // Create indexes for better query performance
+    console.log('📑 Creating indexes...');
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_customer ON orders(customer_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_date ON orders(order_date);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_items_variant ON order_items(variant_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_correlation_product_a ON product_correlations(product_a_id);`);
+    console.log('✅ All indexes ready');
+
+    console.log('🔥🔥🔥 BEAST MODE DATABASE READY!');
   } catch (error) {
     console.error('❌ Database init error:', error);
     console.error('Stack:', error.stack);
@@ -400,6 +477,182 @@ async function importSalesData(storeName, accessToken) {
   }
 }
 
+// 🔥 BEAST MODE: Import full order data for customer analytics
+async function importOrderData(storeName, accessToken) {
+  console.log('🛒🔥 BEAST MODE: Starting order data import...');
+  
+  try {
+    let allOrders = [];
+    let hasNextPage = true;
+    let pageInfo = null;
+    let pageCount = 0;
+    const MAX_PAGES = 50; // Limit to prevent infinite loops (50 pages * 250 = 12,500 orders)
+
+    // Fetch orders from Shopify
+    while (hasNextPage && pageCount < MAX_PAGES) {
+      let url = `https://${storeName}/admin/api/2024-01/orders.json?status=any&limit=250`;
+      if (pageInfo) {
+        url += `&page_info=${pageInfo}`;
+      }
+
+      const response = await fetch(url, {
+        headers: {
+          'X-Shopify-Access-Token': accessToken,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Orders API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      allOrders = allOrders.concat(data.orders || []);
+      pageCount++;
+      console.log(`📦 Fetched page ${pageCount}: ${data.orders?.length || 0} orders`);
+
+      const linkHeader = response.headers.get('Link');
+      if (linkHeader && linkHeader.includes('rel="next"')) {
+        const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)>;\s*rel="next"/);
+        if (nextMatch) {
+          pageInfo = nextMatch[1];
+        } else {
+          hasNextPage = false;
+        }
+      } else {
+        hasNextPage = false;
+      }
+    }
+
+    console.log(`🎯 Fetched ${allOrders.length} total orders`);
+
+    // Process each order
+    let ordersProcessed = 0;
+    let itemsProcessed = 0;
+    const customerOrderCounts = new Map();
+
+    for (const order of allOrders) {
+      try {
+        const customerId = order.customer?.id || null;
+        const emailHash = order.customer?.email ? 
+          require('crypto').createHash('md5').update(order.customer.email).digest('hex') : null;
+
+        // Track customer order count
+        if (customerId) {
+          customerOrderCounts.set(customerId, (customerOrderCounts.get(customerId) || 0) + 1);
+        }
+
+        const isReturning = customerOrderCounts.get(customerId) > 1;
+
+        // Insert/Update order
+        await pool.query(`
+          INSERT INTO orders (
+            order_id, order_number, customer_id, customer_email_hash,
+            total_price, subtotal_price, total_tax, order_date, is_returning_customer
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          ON CONFLICT (order_id) DO UPDATE SET
+            total_price = EXCLUDED.total_price,
+            is_returning_customer = EXCLUDED.is_returning_customer
+        `, [
+          order.id,
+          order.order_number || order.name,
+          customerId,
+          emailHash,
+          parseFloat(order.total_price) || 0,
+          parseFloat(order.subtotal_price) || 0,
+          parseFloat(order.total_tax) || 0,
+          order.created_at,
+          isReturning
+        ]);
+
+        ordersProcessed++;
+
+        // Insert order items
+        if (order.line_items && order.line_items.length > 0) {
+          for (let i = 0; i < order.line_items.length; i++) {
+            const item = order.line_items[i];
+            
+            await pool.query(`
+              INSERT INTO order_items (
+                order_id, variant_id, product_id, quantity, price, cart_position
+              ) VALUES ($1, $2, $3, $4, $5, $6)
+              ON CONFLICT DO NOTHING
+            `, [
+              order.id,
+              item.variant_id,
+              item.product_id,
+              item.quantity || 1,
+              parseFloat(item.price) || 0,
+              i + 1 // Cart position (1st product, 2nd product, etc.)
+            ]);
+
+            itemsProcessed++;
+          }
+        }
+
+        // Update customer stats
+        if (customerId) {
+          await pool.query(`
+            INSERT INTO customer_stats (
+              customer_id, customer_email_hash, order_count, total_spent, 
+              first_order_date, last_order_date
+            ) 
+            SELECT 
+              $1, $2, 
+              COUNT(*), 
+              SUM(total_price),
+              MIN(order_date),
+              MAX(order_date)
+            FROM orders WHERE customer_id = $1
+            ON CONFLICT (customer_id) DO UPDATE SET
+              order_count = EXCLUDED.order_count,
+              total_spent = EXCLUDED.total_spent,
+              average_order_value = EXCLUDED.total_spent / EXCLUDED.order_count,
+              last_order_date = EXCLUDED.last_order_date,
+              updated_at = NOW()
+          `, [customerId, emailHash]);
+        }
+
+      } catch (err) {
+        console.error(`❌ Error processing order ${order.id}:`, err.message);
+      }
+    }
+
+    // Calculate product correlations (which products are bought together)
+    console.log('🤝 Calculating product correlations...');
+    await pool.query(`
+      INSERT INTO product_correlations (product_a_id, product_b_id, co_purchase_count, correlation_score)
+      SELECT 
+        a.product_id as product_a_id,
+        b.product_id as product_b_id,
+        COUNT(DISTINCT a.order_id) as co_purchase_count,
+        (COUNT(DISTINCT a.order_id)::DECIMAL / 
+          (SELECT COUNT(DISTINCT order_id) FROM order_items WHERE product_id = a.product_id)) as correlation_score
+      FROM order_items a
+      JOIN order_items b ON a.order_id = b.order_id AND a.product_id < b.product_id
+      GROUP BY a.product_id, b.product_id
+      HAVING COUNT(DISTINCT a.order_id) >= 2
+      ON CONFLICT (product_a_id, product_b_id) DO UPDATE SET
+        co_purchase_count = EXCLUDED.co_purchase_count,
+        correlation_score = EXCLUDED.correlation_score,
+        updated_at = NOW()
+    `);
+
+    console.log(`✅🔥 BEAST MODE COMPLETE: ${ordersProcessed} orders, ${itemsProcessed} items processed!`);
+
+    return {
+      success: true,
+      ordersProcessed,
+      itemsProcessed,
+      message: `Beast mode engaged! ${ordersProcessed} orders analyzed.`
+    };
+
+  } catch (error) {
+    console.error('❌ Order import failed:', error);
+    throw error;
+  }
+}
+
 // API Endpoints
 
 app.get('/', (req, res) => {
@@ -499,6 +752,18 @@ app.post('/api/shopify', async (req, res) => {
         salesCount
       });
 
+    } else if (action === 'refreshOrders') {
+      console.log('🔥🛒 BEAST MODE ORDER REFRESH REQUESTED...');
+      
+      const result = await importOrderData(storeName, accessToken);
+      
+      res.json({ 
+        success: true, 
+        message: result.message,
+        ordersProcessed: result.ordersProcessed,
+        itemsProcessed: result.itemsProcessed
+      });
+
     } else {
       res.status(400).json({ error: 'Invalid action' });
     }
@@ -538,9 +803,47 @@ app.get('/api/product/:upc', async (req, res) => {
     }
 
     const product = result.rows[0];
+    
+    // 🔥 BEAST MODE: Get analytics data
+    const analyticsQuery = await pool.query(`
+      SELECT 
+        COUNT(DISTINCT oi.order_id) as times_purchased,
+        AVG(o.total_price) as average_order_value,
+        SUM(CASE WHEN o.is_returning_customer THEN 1 ELSE 0 END) as returning_customer_purchases,
+        SUM(CASE WHEN NOT o.is_returning_customer THEN 1 ELSE 0 END) as new_customer_purchases,
+        AVG(oi.cart_position) as average_cart_position
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.order_id
+      WHERE oi.variant_id = $1
+    `, [product.variant_id]);
+    
+    const analytics = analyticsQuery.rows[0] || {};
+    
+    // Get top 3 products bought together
+    const correlationsQuery = await pool.query(`
+      SELECT 
+        p.title,
+        p.variant_title,
+        pc.co_purchase_count,
+        pc.correlation_score
+      FROM product_correlations pc
+      JOIN products p ON (p.product_id = pc.product_b_id OR p.product_id = pc.product_a_id)
+      WHERE (pc.product_a_id = $1 OR pc.product_b_id = $1)
+        AND p.product_id != $1
+      ORDER BY pc.co_purchase_count DESC
+      LIMIT 3
+    `, [product.product_id]);
+    
+    const boughtTogether = correlationsQuery.rows.map(r => ({
+      name: r.variant_title ? `${r.title} - ${r.variant_title}` : r.title,
+      count: parseInt(r.co_purchase_count),
+      score: parseFloat(r.correlation_score)
+    }));
+
     console.log(`✅ Found: ${product.title}`);
     console.log(`📊 Sales: Day=${product.daily_sales}, Week=${product.weekly_sales}, Month=${product.monthly_sales}`);
     console.log(`📦 Stock: ${product.inventory_quantity} units`);
+    console.log(`💰 AOV: $${analytics.average_order_value || 0}`);
 
     res.json({
       title: product.title,
@@ -560,7 +863,16 @@ app.get('/api/product/:upc', async (req, res) => {
       vendor: product.vendor,
       tags: product.tags,
       createdAt: product.created_at,
-      updatedAt: product.updated_at
+      updatedAt: product.updated_at,
+      // 🔥 BEAST MODE Analytics
+      analytics: {
+        timesPurchased: parseInt(analytics.times_purchased) || 0,
+        averageOrderValue: parseFloat(analytics.average_order_value) || 0,
+        returningCustomerPurchases: parseInt(analytics.returning_customer_purchases) || 0,
+        newCustomerPurchases: parseInt(analytics.new_customer_purchases) || 0,
+        averageCartPosition: parseFloat(analytics.average_cart_position) || 0,
+        boughtTogether: boughtTogether
+      }
     });
 
   } catch (error) {
