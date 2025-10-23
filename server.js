@@ -489,9 +489,11 @@ async function importOrderData(storeName, accessToken) {
     let pageCount = 0;
     const MAX_PAGES = 50; // Limit to prevent infinite loops (50 pages * 250 = 12,500 orders)
 
-    // Fetch orders from Shopify
+    // Fetch orders from Shopify - get ALL orders from the beginning
+    console.log('📅 Fetching ALL orders (including historical)...');
     while (hasNextPage && pageCount < MAX_PAGES) {
-      let url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250`;
+      // Use created_at_min to get orders from 2020 onwards (adjust if your store is older)
+      let url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&created_at_min=2020-01-01`;
       if (pageInfo) {
         url += `&page_info=${pageInfo}`;
       }
@@ -512,17 +514,22 @@ async function importOrderData(storeName, accessToken) {
       const data = await response.json();
       allOrders = allOrders.concat(data.orders || []);
       pageCount++;
-      console.log(`📦 Fetched page ${pageCount}: ${data.orders?.length || 0} orders`);
+      console.log(`📦 Fetched page ${pageCount}: ${data.orders?.length || 0} orders (Total so far: ${allOrders.length})`);
 
       const linkHeader = response.headers.get('Link');
+      console.log(`🔗 Link header:`, linkHeader);
+      
       if (linkHeader && linkHeader.includes('rel="next"')) {
         const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)>;\s*rel="next"/);
         if (nextMatch) {
           pageInfo = nextMatch[1];
+          console.log(`➡️ Found next page with pageInfo: ${pageInfo.substring(0, 20)}...`);
         } else {
+          console.log(`⚠️ Has 'next' in link header but couldn't parse page_info`);
           hasNextPage = false;
         }
       } else {
+        console.log(`✅ No more pages - this was the last page`);
         hasNextPage = false;
       }
     }
