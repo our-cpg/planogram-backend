@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import pg from 'pg';
+import crypto from 'crypto';
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -535,7 +536,7 @@ async function importOrderData(storeName, accessToken) {
       try {
         const customerId = order.customer?.id || null;
         const emailHash = order.customer?.email ? 
-          require('crypto').createHash('md5').update(order.customer.email).digest('hex') : null;
+          crypto.createHash('md5').update(order.customer.email).digest('hex') : null;
 
         // Track customer order count
         if (customerId) {
