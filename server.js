@@ -264,7 +264,18 @@ async function importSalesData(storeName, accessToken) {
       });
 
       if (!response.ok) {
-        throw new Error(`Shopify Orders API error: ${response.status}`);
+        const errorBody = await response.text();
+        console.error(`❌ Orders API failed with ${response.status} on page ${pageCount}`);
+        console.error(`Response: ${errorBody}`);
+        
+        // If we already got some orders, break the loop and process what we have
+        if (allOrders.length > 0) {
+          console.log(`⚠️ Pagination failed, but we have ${allOrders.length} orders. Processing what we got...`);
+          hasNextPage = false;
+          break;
+        }
+        
+        throw new Error(`Shopify Orders API error: ${response.status} - ${errorBody}`);
       }
 
       const data = await response.json();
