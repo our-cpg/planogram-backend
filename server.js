@@ -54,12 +54,28 @@ async function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_barcode ON products(barcode);
     `);
 
+    // UPDATED: Add columns for different time periods
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sales_data (
         variant_id BIGINT PRIMARY KEY,
+        daily_sales INTEGER DEFAULT 0,
+        weekly_sales INTEGER DEFAULT 0,
         monthly_sales INTEGER DEFAULT 0,
+        quarterly_sales INTEGER DEFAULT 0,
+        yearly_sales INTEGER DEFAULT 0,
+        all_time_sales INTEGER DEFAULT 0,
         last_updated TIMESTAMP DEFAULT NOW()
       );
+    `);
+
+    // Add new columns to existing table if they don't exist
+    await pool.query(`
+      ALTER TABLE sales_data 
+      ADD COLUMN IF NOT EXISTS daily_sales INTEGER DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS weekly_sales INTEGER DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS quarterly_sales INTEGER DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS yearly_sales INTEGER DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS all_time_sales INTEGER DEFAULT 0;
     `);
 
     console.log('✅ Database tables initialized');
@@ -68,7 +84,7 @@ async function initDatabase() {
   }
 }
 
-// Import products from Shopify (MEMORY EFFICIENT + TITLE FILTER + NO TRUNCATE!)
+// Import products from Shopify (MEMORY EFFICIENT + TITLE FILTER)
 async function importProducts(storeName, accessToken) {
   console.log('🔄 Starting product import from Shopify...');
   console.log('📋 Filtering: Only products with proper title case (not ALL CAPS)');
@@ -80,33 +96,18 @@ async function importProducts(storeName, accessToken) {
     let totalInserted = 0;
     let totalSkipped = 0;
 
-    // ✅ REMOVED TRUNCATE - Products will persist now!
-    // The ON CONFLICT clause handles updates automatically
-
-    // Helper function to check if title is properly formatted
     const isProperlyFormatted = (title) => {
-      // Skip if title is all uppercase (like "WAVING BUTTER POMADE")
-      if (title === title.toUpperCase()) {
-        return false;
-      }
-      
-      // Must have at least one lowercase letter (like "Waving Butter Pomade")
-      if (!/[a-z]/.test(title)) {
-        return false;
-      }
-      
+      if (title === title.toUpperCase()) return false;
+      if (!/[a-z]/.test(title)) return false;
       return true;
     };
 
-    // Helper function to clean store name
     const cleanStoreName = (name) => {
-      // Remove .myshopify.com if it's already included
       return name.replace('.myshopify.com', '');
     };
 
     const storeNameClean = cleanStoreName(storeName);
 
-    // Fetch and insert in batches (memory efficient!)
     while (hasNextPage) {
       const url = pageInfo 
         ? `https://${storeNameClean}.myshopify.com/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
@@ -129,9 +130,7 @@ async function importProducts(storeName, accessToken) {
       pageCount++;
       console.log(`📦 Fetched page ${pageCount}: ${products.length} products`);
 
-      // Filter and insert products immediately (don't store in memory)
       for (const product of products) {
-        // Skip if title is not properly formatted
         if (!isProperlyFormatted(product.title)) {
           totalSkipped++;
           continue;
@@ -178,9 +177,8 @@ async function importProducts(storeName, accessToken) {
         }
       }
 
-      console.log(`✅ Page ${pageCount}: ${totalInserted} inserted, ${totalSkipped} skipped (ALL CAPS)`);
+      console.log(`✅ Page ${pageCount}: ${totalInserted} inserted, ${totalSkipped} skipped`);
 
-      // Check for next page
       const linkHeader = response.headers.get('Link');
       if (linkHeader && linkHeader.includes('rel="next"')) {
         const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)>;\s*rel="next"/);
@@ -190,14 +188,13 @@ async function importProducts(storeName, accessToken) {
         hasNextPage = false;
       }
 
-      // Small delay to avoid rate limits
       await new Promise(resolve => setTimeout(resolve, 500));
     }
 
-    console.log(`✅ Import complete! ${totalInserted} products inserted, ${totalSkipped} skipped (ALL CAPS)`);
+    console.log(`✅ Import complete! ${totalInserted} products inserted, ${totalSkipped} skipped`);
     return { 
       success: true, 
-      message: `Successfully imported ${totalInserted} products (${totalSkipped} skipped due to ALL CAPS titles)`,
+      message: `Successfully imported ${totalInserted} products (${totalSkipped} skipped)`,
       total: totalInserted,
       skipped: totalSkipped
     };
@@ -208,25 +205,32 @@ async function importProducts(storeName, accessToken) {
   }
 }
 
-// Import sales data from Shopify Orders API
+// UPDATED: Import sales data for multiple time periods
 async function importSalesData(storeName, accessToken) {
   console.log('📊 Starting sales data import from Shopify Orders...');
   
   try {
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const now = new Date();
+    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const oneMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const threeMonthsAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const oneYearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
     
+    const storeNameClean = storeName.replace('.myshopify.com', '');
+
+    // Fetch all orders from the past year (to get all-time data)
     let allOrders = [];
     let hasNextPage = true;
     let pageInfo = null;
+    let pageCount = 0;
 
-    // Clean store name (remove .myshopify.com if present)
-    const storeNameClean = storeName.replace('.myshopify.com', '');
+    console.log('📥 Fetching orders from last year...');
 
     while (hasNextPage) {
       const url = pageInfo 
-        ? `https://${storeNameClean}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${thirtyDaysAgo.toISOString()}&page_info=${pageInfo}`
-        : `https://${storeNameClean}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${thirtyDaysAgo.toISOString()}`;
+        ? `https://${storeNameClean}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${oneYearAgo.toISOString()}&page_info=${pageInfo}`
+        : `https://${storeNameClean}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${oneYearAgo.toISOString()}`;
 
       const response = await fetch(url, {
         headers: {
@@ -241,6 +245,8 @@ async function importSalesData(storeName, accessToken) {
 
       const data = await response.json();
       allOrders = allOrders.concat(data.orders || []);
+      pageCount++;
+      console.log(`📦 Fetched page ${pageCount}: ${data.orders?.length || 0} orders`);
 
       const linkHeader = response.headers.get('Link');
       if (linkHeader && linkHeader.includes('rel="next"')) {
@@ -250,34 +256,97 @@ async function importSalesData(storeName, accessToken) {
       } else {
         hasNextPage = false;
       }
+
+      // Small delay to avoid rate limits
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
 
-    console.log(`📦 Fetched ${allOrders.length} orders from last 30 days`);
+    console.log(`✅ Fetched ${allOrders.length} total orders from last year`);
 
+    // Calculate sales for each time period
     const salesByVariant = {};
     
     allOrders.forEach(order => {
+      const orderDate = new Date(order.created_at);
+      
       order.line_items?.forEach(item => {
         const variantId = item.variant_id;
-        if (variantId) {
-          salesByVariant[variantId] = (salesByVariant[variantId] || 0) + item.quantity;
+        if (!variantId) return;
+
+        if (!salesByVariant[variantId]) {
+          salesByVariant[variantId] = {
+            daily: 0,
+            weekly: 0,
+            monthly: 0,
+            quarterly: 0,
+            yearly: 0,
+            allTime: 0
+          };
         }
+
+        const qty = item.quantity;
+        salesByVariant[variantId].allTime += qty;
+        
+        if (orderDate >= oneDayAgo) salesByVariant[variantId].daily += qty;
+        if (orderDate >= oneWeekAgo) salesByVariant[variantId].weekly += qty;
+        if (orderDate >= oneMonthAgo) salesByVariant[variantId].monthly += qty;
+        if (orderDate >= threeMonthsAgo) salesByVariant[variantId].quarterly += qty;
+        if (orderDate >= oneYearAgo) salesByVariant[variantId].yearly += qty;
       });
     });
 
-    for (const [variantId, quantity] of Object.entries(salesByVariant)) {
+    console.log(`📊 Processing sales data for ${Object.keys(salesByVariant).length} variants...`);
+
+    // Insert/update sales data
+    let updated = 0;
+    for (const [variantId, sales] of Object.entries(salesByVariant)) {
       await pool.query(`
-        INSERT INTO sales_data (variant_id, monthly_sales, last_updated)
-        VALUES ($1, $2, NOW())
+        INSERT INTO sales_data (
+          variant_id, 
+          daily_sales, 
+          weekly_sales, 
+          monthly_sales, 
+          quarterly_sales, 
+          yearly_sales, 
+          all_time_sales,
+          last_updated
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
         ON CONFLICT (variant_id) 
         DO UPDATE SET 
-          monthly_sales = $2,
+          daily_sales = $2,
+          weekly_sales = $3,
+          monthly_sales = $4,
+          quarterly_sales = $5,
+          yearly_sales = $6,
+          all_time_sales = $7,
           last_updated = NOW()
-      `, [variantId, quantity]);
+      `, [
+        variantId, 
+        sales.daily, 
+        sales.weekly, 
+        sales.monthly, 
+        sales.quarterly, 
+        sales.yearly, 
+        sales.allTime
+      ]);
+      updated++;
     }
 
-    console.log(`✅ Sales data imported for ${Object.keys(salesByVariant).length} variants`);
-    return { success: true, message: 'Sales data imported successfully' };
+    console.log(`✅ Sales data imported for ${updated} variants`);
+    console.log(`📊 Breakdown:`);
+    console.log(`   - Daily sales tracked`);
+    console.log(`   - Weekly sales tracked`);
+    console.log(`   - Monthly sales tracked`);
+    console.log(`   - Quarterly sales tracked`);
+    console.log(`   - Yearly sales tracked`);
+    console.log(`   - All-time sales tracked`);
+    
+    return { 
+      success: true, 
+      message: 'Sales data imported for all time periods',
+      variantsUpdated: updated
+    };
 
   } catch (error) {
     console.error('❌ Sales import failed:', error);
@@ -287,12 +356,10 @@ async function importSalesData(storeName, accessToken) {
 
 // API Endpoints
 
-// Health check
 app.get('/', (req, res) => {
   res.json({ status: 'Planogram Backend Running', timestamp: new Date().toISOString() });
 });
 
-// Shopify operations endpoint
 app.post('/api/shopify', async (req, res) => {
   const { storeName, accessToken, action } = req.body;
 
@@ -302,7 +369,6 @@ app.post('/api/shopify', async (req, res) => {
 
   try {
     if (action === 'connect') {
-      // Clean store name (remove .myshopify.com if present)
       const storeNameClean = storeName.replace('.myshopify.com', '');
       const testUrl = `https://${storeNameClean}.myshopify.com/admin/api/2024-01/shop.json`;
       const response = await fetch(testUrl, {
@@ -348,7 +414,7 @@ app.post('/api/shopify', async (req, res) => {
   }
 });
 
-// UPC lookup endpoint
+// UPDATED: Return sales data for all time periods
 app.get('/api/product/:upc', async (req, res) => {
   const { upc } = req.params;
   
@@ -358,7 +424,12 @@ app.get('/api/product/:upc', async (req, res) => {
     const result = await pool.query(`
       SELECT 
         p.*,
-        COALESCE(s.monthly_sales, 0) as monthly_sales
+        COALESCE(s.daily_sales, 0) as daily_sales,
+        COALESCE(s.weekly_sales, 0) as weekly_sales,
+        COALESCE(s.monthly_sales, 0) as monthly_sales,
+        COALESCE(s.quarterly_sales, 0) as quarterly_sales,
+        COALESCE(s.yearly_sales, 0) as yearly_sales,
+        COALESCE(s.all_time_sales, 0) as all_time_sales
       FROM products p
       LEFT JOIN sales_data s ON p.variant_id = s.variant_id
       WHERE p.barcode = $1
@@ -372,13 +443,19 @@ app.get('/api/product/:upc', async (req, res) => {
 
     const product = result.rows[0];
     console.log(`✅ Found product: ${product.title}`);
+    console.log(`📊 Sales: Daily=${product.daily_sales}, Weekly=${product.weekly_sales}, Monthly=${product.monthly_sales}`);
 
     res.json({
       title: product.title,
       variantTitle: product.variant_title,
       price: parseFloat(product.price),
       cost: product.cost ? parseFloat(product.cost) : parseFloat(product.price) * 0.6,
+      dailySales: parseInt(product.daily_sales) || 0,
+      weeklySales: parseInt(product.weekly_sales) || 0,
       monthlySales: parseInt(product.monthly_sales) || 0,
+      quarterlySales: parseInt(product.quarterly_sales) || 0,
+      yearlySales: parseInt(product.yearly_sales) || 0,
+      allTimeSales: parseInt(product.all_time_sales) || 0,
       barcode: product.barcode,
       sku: product.sku,
       inventoryQuantity: product.inventory_quantity
@@ -390,22 +467,22 @@ app.get('/api/product/:upc', async (req, res) => {
   }
 });
 
-// Database stats endpoint
 app.get('/api/stats', async (req, res) => {
   try {
     const productCount = await pool.query('SELECT COUNT(*) as count FROM products');
-    const salesCount = await pool.query('SELECT COUNT(*) as count FROM sales_data');
+    const salesCount = await pool.query('SELECT COUNT(*) as count FROM sales_data WHERE monthly_sales > 0');
+    const totalSales = await pool.query('SELECT SUM(monthly_sales) as total FROM sales_data');
     
     res.json({
       products: parseInt(productCount.rows[0].count),
-      salesTracked: parseInt(salesCount.rows[0].count)
+      productsWithSales: parseInt(salesCount.rows[0].count),
+      totalMonthlySales: parseInt(totalSales.rows[0].total) || 0
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Initialize and start server
 async function startServer() {
   await initDatabase();
   app.listen(PORT, () => {
@@ -413,7 +490,6 @@ async function startServer() {
   });
 }
 
-// Test database connection
 pool.query('SELECT NOW()', (err, res) => {
   if (err) {
     console.error('❌ Database connection failed:', err);
