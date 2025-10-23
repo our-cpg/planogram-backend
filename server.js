@@ -135,8 +135,8 @@ async function importProducts(storeName, accessToken) {
 
     while (hasNextPage) {
       const url = pageInfo 
-        ? `https://${storeNameClean}.myshopify.com/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
-        : `https://${storeNameClean}.myshopify.com/admin/api/2024-01/products.json?limit=250`;
+        ? `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products.json?limit=250&page_info=${pageInfo}`
+        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products.json?limit=250`;
 
       const response = await fetch(url, {
         headers: {
@@ -253,8 +253,8 @@ async function importSalesData(storeName, accessToken) {
 
     while (hasNextPage) {
       const url = pageInfo 
-        ? `https://${storeNameClean}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${oneYearAgo.toISOString()}&page_info=${pageInfo}`
-        : `https://${storeNameClean}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&created_at_min=${oneYearAgo.toISOString()}`;
+        ? `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${oneYearAgo.toISOString()}&page_info=${pageInfo}`
+        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${oneYearAgo.toISOString()}`;
 
       const response = await fetch(url, {
         headers: {
@@ -396,7 +396,7 @@ app.post('/api/shopify', async (req, res) => {
   try {
     if (action === 'connect') {
       const storeNameClean = storeName.replace('.myshopify.com', '');
-      const testUrl = `https://${storeNameClean}.myshopify.com/admin/api/2024-01/shop.json`;
+      const testUrl = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/shop.json`;
       
       console.log(`🔌 Testing connection to ${storeNameClean}...`);
       
