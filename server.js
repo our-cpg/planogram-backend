@@ -49,11 +49,22 @@ async function initDatabase() {
         compare_at_price DECIMAL(10,2),
         cost DECIMAL(10,2),
         inventory_quantity INTEGER,
+        vendor TEXT,
+        tags TEXT,
         created_at TIMESTAMP,
         updated_at TIMESTAMP
       );
     `);
     console.log('✅ Products table ready');
+
+    // Add vendor and tags columns if they don't exist
+    try {
+      await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS vendor TEXT;`);
+      await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS tags TEXT;`);
+      console.log('✅ Vendor and tags columns added');
+    } catch (err) {
+      console.log('⚠️ Columns might already exist:', err.message);
+    }
 
     // Create index
     console.log('📑 Creating barcode index...');
@@ -167,8 +178,8 @@ async function importProducts(storeName, accessToken) {
               INSERT INTO products (
                 variant_id, product_id, title, variant_title, barcode, sku, 
                 price, compare_at_price, cost, inventory_quantity, 
-                created_at, updated_at
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                vendor, tags, created_at, updated_at
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
               ON CONFLICT (variant_id) 
               DO UPDATE SET
                 title = EXCLUDED.title,
@@ -179,6 +190,8 @@ async function importProducts(storeName, accessToken) {
                 compare_at_price = EXCLUDED.compare_at_price,
                 cost = EXCLUDED.cost,
                 inventory_quantity = EXCLUDED.inventory_quantity,
+                vendor = EXCLUDED.vendor,
+                tags = EXCLUDED.tags,
                 updated_at = EXCLUDED.updated_at
             `, [
               variant.id,
@@ -191,6 +204,8 @@ async function importProducts(storeName, accessToken) {
               variant.compare_at_price ? parseFloat(variant.compare_at_price) : null,
               variant.inventory_management ? parseFloat(variant.price) * 0.6 : null,
               variant.inventory_quantity || 0,
+              product.vendor || null,
+              product.tags ? product.tags.join(', ') : null,
               product.created_at,
               product.updated_at
             ]);
@@ -433,7 +448,7 @@ app.post('/api/shopify', async (req, res) => {
       });
 
     } else if (action === 'refreshCache') {
-      console.log('🔄 REFRESH CACHE REQUESTED - This will take 2-5 minutes...');
+      console.log('🔄 FULL REFRESH REQUESTED - Products + Sales...');
       
       console.log('Step 1/2: Importing products...');
       await importProducts(storeName, accessToken);
@@ -448,6 +463,41 @@ app.post('/api/shopify', async (req, res) => {
       
       res.json({ 
         success: true, 
+        message: `Full refresh complete! ${productCount} products with sales data`,
+        productCount
+      });
+
+    } else if (action === 'refreshProducts') {
+      console.log('📦 PRODUCTS REFRESH REQUESTED...');
+      
+      await importProducts(storeName, accessToken);
+      
+      const countResult = await pool.query('SELECT COUNT(*) as count FROM products');
+      const productCount = parseInt(countResult.rows[0].count);
+      
+      console.log(`✅ Products imported: ${productCount}`);
+      
+      res.json({ 
+        success: true, 
+        message: `${productCount} products imported`,
+        productCount
+      });
+
+    } else if (action === 'refreshSales') {
+      console.log('📊 SALES REFRESH REQUESTED...');
+      
+      await importSalesData(storeName, accessToken);
+      
+      const salesResult = await pool.query('SELECT COUNT(*) as count FROM sales_data WHERE monthly_sales > 0');
+      const salesCount = parseInt(salesResult.rows[0].count);
+      
+      console.log(`✅ Sales data updated: ${salesCount} variants with sales`);
+      
+      res.json({ 
+        success: true, 
+        message: `Sales updated! ${salesCount} products with sales data`,
+        salesCount
+      }); 
         message: `Cache refreshed! ${productCount} products with sales data`,
         productCount
       });
@@ -493,11 +543,13 @@ app.get('/api/product/:upc', async (req, res) => {
     const product = result.rows[0];
     console.log(`✅ Found: ${product.title}`);
     console.log(`📊 Sales: Day=${product.daily_sales}, Week=${product.weekly_sales}, Month=${product.monthly_sales}`);
+    console.log(`📦 Stock: ${product.inventory_quantity} units`);
 
     res.json({
       title: product.title,
       variantTitle: product.variant_title,
       price: parseFloat(product.price),
+      compareAtPrice: product.compare_at_price ? parseFloat(product.compare_at_price) : null,
       cost: product.cost ? parseFloat(product.cost) : parseFloat(product.price) * 0.6,
       dailySales: parseInt(product.daily_sales) || 0,
       weeklySales: parseInt(product.weekly_sales) || 0,
@@ -507,7 +559,11 @@ app.get('/api/product/:upc', async (req, res) => {
       allTimeSales: parseInt(product.all_time_sales) || 0,
       barcode: product.barcode,
       sku: product.sku,
-      inventoryQuantity: product.inventory_quantity
+      inventoryQuantity: parseInt(product.inventory_quantity) || 0,
+      vendor: product.vendor,
+      tags: product.tags,
+      createdAt: product.created_at,
+      updatedAt: product.updated_at
     });
 
   } catch (error) {
