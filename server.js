@@ -491,7 +491,7 @@ async function importOrderData(storeName, accessToken) {
 
     // Fetch orders from Shopify
     while (hasNextPage && pageCount < MAX_PAGES) {
-      let url = `https://${storeName}/admin/api/2024-01/orders.json?status=any&limit=250`;
+      let url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250`;
       if (pageInfo) {
         url += `&page_info=${pageInfo}`;
       }
@@ -504,7 +504,9 @@ async function importOrderData(storeName, accessToken) {
       });
 
       if (!response.ok) {
-        throw new Error(`Orders API error: ${response.status}`);
+        const errorText = await response.text();
+        console.error(`❌ Orders API failed: ${response.status}`, errorText);
+        throw new Error(`Orders API error: ${response.status} - ${errorText}`);
       }
 
       const data = await response.json();
