@@ -492,10 +492,13 @@ async function importOrderData(storeName, accessToken) {
     // Fetch orders from Shopify - get ALL orders from the beginning
     console.log('📅 Fetching ALL orders (including historical)...');
     while (hasNextPage && pageCount < MAX_PAGES) {
-      // Use created_at_min to get orders from 2020 onwards (adjust if your store is older)
-      let url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&created_at_min=2020-01-01`;
+      let url;
       if (pageInfo) {
-        url += `&page_info=${pageInfo}`;
+        // When paginating, ONLY use page_info (no other params)
+        url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&page_info=${pageInfo}`;
+      } else {
+        // First request: get all orders from 2020 onwards
+        url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&created_at_min=2020-01-01`;
       }
 
       const response = await fetch(url, {
@@ -595,10 +598,16 @@ async function importOrderData(storeName, accessToken) {
 
         ordersProcessed++;
 
-        // Insert order items
+        // Insert order items (skip items without variant_id like custom items, gift cards)
         if (order.line_items && order.line_items.length > 0) {
           for (let i = 0; i < order.line_items.length; i++) {
             const item = order.line_items[i];
+            
+            // Skip items without variant_id (custom line items, gift cards, etc)
+            if (!item.variant_id || !item.product_id) {
+              console.log(`⚠️ Skipping line item without variant_id in order ${order.id}`);
+              continue;
+            }
             
             await pool.query(`
               INSERT INTO order_items (
