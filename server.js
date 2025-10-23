@@ -497,9 +497,6 @@ app.post('/api/shopify', async (req, res) => {
         success: true, 
         message: `Sales updated! ${salesCount} products with sales data`,
         salesCount
-      }); 
-        message: `Cache refreshed! ${productCount} products with sales data`,
-        productCount
       });
 
     } else {
