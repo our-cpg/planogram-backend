@@ -529,9 +529,22 @@ async function importOrderData(storeName, accessToken) {
 
     console.log(`🎯 Fetched ${allOrders.length} total orders`);
 
+    // Handle stores with no orders
+    if (allOrders.length === 0) {
+      console.log('ℹ️ No orders found in store');
+      return {
+        success: true,
+        ordersProcessed: 0,
+        itemsProcessed: 0,
+        ordersWithoutCustomers: 0,
+        message: 'No orders found. Add some orders to your Shopify store to enable BEAST MODE analytics!'
+      };
+    }
+
     // Process each order
     let ordersProcessed = 0;
     let itemsProcessed = 0;
+    let ordersWithoutCustomers = 0;
     const customerOrderCounts = new Map();
 
     for (const order of allOrders) {
@@ -540,12 +553,17 @@ async function importOrderData(storeName, accessToken) {
         const emailHash = order.customer?.email ? 
           crypto.createHash('md5').update(order.customer.email).digest('hex') : null;
 
-        // Track customer order count
+        // Track orders without customers
+        if (!customerId) {
+          ordersWithoutCustomers++;
+        }
+
+        // Track customer order count (only if customer exists)
         if (customerId) {
           customerOrderCounts.set(customerId, (customerOrderCounts.get(customerId) || 0) + 1);
         }
 
-        const isReturning = customerOrderCounts.get(customerId) > 1;
+        const isReturning = customerId ? (customerOrderCounts.get(customerId) > 1) : false;
 
         // Insert/Update order
         await pool.query(`
@@ -642,12 +660,14 @@ async function importOrderData(storeName, accessToken) {
     `);
 
     console.log(`✅🔥 BEAST MODE COMPLETE: ${ordersProcessed} orders, ${itemsProcessed} items processed!`);
+    console.log(`📊 Orders without customers (guest checkouts): ${ordersWithoutCustomers}`);
 
     return {
       success: true,
       ordersProcessed,
       itemsProcessed,
-      message: `Beast mode engaged! ${ordersProcessed} orders analyzed.`
+      ordersWithoutCustomers,
+      message: `Beast mode engaged! ${ordersProcessed} orders analyzed (${ordersWithoutCustomers} guest orders).`
     };
 
   } catch (error) {
