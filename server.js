@@ -490,15 +490,15 @@ async function importOrderData(storeName, accessToken) {
     const MAX_PAGES = 50; // Limit to prevent infinite loops (50 pages * 250 = 12,500 orders)
 
     // Fetch orders from Shopify - get ALL orders from the beginning
-    console.log('📅 Fetching ALL orders (including historical)...');
+    console.log('📅 Fetching ALL orders...');
     while (hasNextPage && pageCount < MAX_PAGES) {
       let url;
       if (pageInfo) {
         // When paginating, ONLY use page_info (no other params)
-        url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&page_info=${pageInfo}`;
+        url = `https://${storeName}/admin/api/2024-10/orders.json?page_info=${pageInfo}`;
       } else {
-        // First request: get all orders from 2020 onwards
-        url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&created_at_min=2020-01-01`;
+        // First request: get all orders (no filters)
+        url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250`;
       }
 
       const response = await fetch(url, {
