@@ -283,7 +283,7 @@ async function importProducts(storeName, accessToken) {
               variant.inventory_management ? parseFloat(variant.price) * 0.6 : null,
               variant.inventory_quantity || 0,
               product.vendor || null,
-              product.tags ? product.tags.join(', ') : null,
+              Array.isArray(product.tags) ? product.tags.join(', ') : (product.tags || null),
               product.created_at,
               product.updated_at
             ]);
