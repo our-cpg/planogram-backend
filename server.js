@@ -62,7 +62,8 @@ async function initDatabase() {
     try {
       await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS vendor TEXT;`);
       await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS tags TEXT;`);
-      console.log('✅ Vendor and tags columns added');
+      await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS distributor TEXT;`);
+      console.log('✅ Vendor, tags, and distributor columns added');
     } catch (err) {
       console.log('⚠️ Columns might already exist:', err.message);
     }
@@ -225,7 +226,7 @@ async function importProducts(storeName, accessToken) {
     while (hasNextPage) {
       const url = pageInfo 
         ? `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products.json?limit=250&page_info=${pageInfo}`
-        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products.json?limit=250`;
+        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products.json?limit=250&fields=id,title,vendor,tags,created_at,updated_at,variants,metafields`;
 
       const response = await fetch(url, {
         headers: {
@@ -252,12 +253,18 @@ async function importProducts(storeName, accessToken) {
 
         for (const variant of product.variants) {
           try {
+            // Extract distributor from metafields (looking for custom.vendor metafield)
+            const distributorMetafield = product.metafields?.find(
+              mf => mf.namespace === 'custom' && mf.key === 'vendor'
+            );
+            const distributor = distributorMetafield?.value || null;
+
             await pool.query(`
               INSERT INTO products (
                 variant_id, product_id, title, variant_title, barcode, sku, 
                 price, compare_at_price, cost, inventory_quantity, 
-                vendor, tags, created_at, updated_at
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                vendor, distributor, tags, created_at, updated_at
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
               ON CONFLICT (variant_id) 
               DO UPDATE SET
                 title = EXCLUDED.title,
@@ -269,6 +276,7 @@ async function importProducts(storeName, accessToken) {
                 cost = EXCLUDED.cost,
                 inventory_quantity = EXCLUDED.inventory_quantity,
                 vendor = EXCLUDED.vendor,
+                distributor = EXCLUDED.distributor,
                 tags = EXCLUDED.tags,
                 updated_at = EXCLUDED.updated_at
             `, [
@@ -283,6 +291,7 @@ async function importProducts(storeName, accessToken) {
               variant.inventory_management ? parseFloat(variant.price) * 0.6 : null,
               variant.inventory_quantity || 0,
               product.vendor || null,
+              distributor,
               Array.isArray(product.tags) ? product.tags.join(', ') : (product.tags || null),
               product.created_at,
               product.updated_at
@@ -900,6 +909,7 @@ app.get('/api/product/:upc', async (req, res) => {
       sku: product.sku,
       inventoryQuantity: parseInt(product.inventory_quantity) || 0,
       vendor: product.vendor,
+      distributor: product.distributor,
       tags: product.tags,
       createdAt: product.created_at,
       updatedAt: product.updated_at,
