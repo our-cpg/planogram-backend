@@ -226,7 +226,7 @@ async function importProducts(storeName, accessToken) {
     while (hasNextPage) {
       const url = pageInfo 
         ? `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products.json?limit=250&page_info=${pageInfo}`
-        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products.json?limit=250&fields=id,title,vendor,tags,created_at,updated_at,variants,metafields`;
+        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products.json?limit=250`;
 
       const response = await fetch(url, {
         headers: {
@@ -253,12 +253,7 @@ async function importProducts(storeName, accessToken) {
 
         for (const variant of product.variants) {
           try {
-            // Extract distributor from metafields (looking for custom.vendor metafield)
-            const distributorMetafield = product.metafields?.find(
-              mf => mf.namespace === 'custom' && mf.key === 'vendor'
-            );
-            const distributor = distributorMetafield?.value || null;
-
+            // Note: Distributor will be null on import, will be fetched when product is scanned
             await pool.query(`
               INSERT INTO products (
                 variant_id, product_id, title, variant_title, barcode, sku, 
@@ -276,7 +271,6 @@ async function importProducts(storeName, accessToken) {
                 cost = EXCLUDED.cost,
                 inventory_quantity = EXCLUDED.inventory_quantity,
                 vendor = EXCLUDED.vendor,
-                distributor = EXCLUDED.distributor,
                 tags = EXCLUDED.tags,
                 updated_at = EXCLUDED.updated_at
             `, [
@@ -291,7 +285,7 @@ async function importProducts(storeName, accessToken) {
               variant.inventory_management ? parseFloat(variant.price) * 0.6 : null,
               variant.inventory_quantity || 0,
               product.vendor || null,
-              distributor,
+              null, // distributor - will be fetched on-demand
               Array.isArray(product.tags) ? product.tags.join(', ') : (product.tags || null),
               product.created_at,
               product.updated_at
@@ -852,6 +846,46 @@ app.get('/api/product/:upc', async (req, res) => {
 
     const product = result.rows[0];
     
+    // Fetch distributor from Shopify metafields if not already in database
+    let distributor = product.distributor;
+    if (!distributor && req.query.fetchMetafields !== 'false') {
+      try {
+        // Get Shopify credentials from request (they should be passed as query params or we use stored ones)
+        const storeName = req.query.storeName || process.env.SHOPIFY_STORE_NAME;
+        const accessToken = req.query.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
+        
+        if (storeName && accessToken && product.product_id) {
+          const metafieldsUrl = `https://${storeName}/admin/api/2025-10/products/${product.product_id}/metafields.json`;
+          const metafieldsResponse = await fetch(metafieldsUrl, {
+            headers: {
+              'X-Shopify-Access-Token': accessToken,
+              'Content-Type': 'application/json'
+            }
+          });
+          
+          if (metafieldsResponse.ok) {
+            const metafieldsData = await metafieldsResponse.json();
+            const distributorMetafield = metafieldsData.metafields?.find(
+              mf => mf.namespace === 'custom' && mf.key === 'vendor'
+            );
+            
+            if (distributorMetafield?.value) {
+              distributor = distributorMetafield.value;
+              // Update database with distributor
+              await pool.query(
+                'UPDATE products SET distributor = $1 WHERE variant_id = $2',
+                [distributor, product.variant_id]
+              );
+              console.log(`✅ Fetched and saved distributor: ${distributor}`);
+            }
+          }
+        }
+      } catch (metafieldError) {
+        console.log('⚠️ Could not fetch metafields:', metafieldError.message);
+        // Don't fail the whole request if metafields fail
+      }
+    }
+    
     // 🔥 BEAST MODE: Get analytics data
     const analyticsQuery = await pool.query(`
       SELECT 
@@ -909,7 +943,7 @@ app.get('/api/product/:upc', async (req, res) => {
       sku: product.sku,
       inventoryQuantity: parseInt(product.inventory_quantity) || 0,
       vendor: product.vendor,
-      distributor: product.distributor,
+      distributor: distributor,
       tags: product.tags,
       createdAt: product.created_at,
       updatedAt: product.updated_at,
