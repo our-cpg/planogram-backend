@@ -346,7 +346,7 @@ async function importSalesData(storeName, accessToken) {
 
     while (hasNextPage) {
       const url = pageInfo 
-        ? `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${oneYearAgo.toISOString()}&page_info=${pageInfo}`
+        ? `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&page_info=${pageInfo}`
         : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${oneYearAgo.toISOString()}`;
 
       const response = await fetch(url, {
