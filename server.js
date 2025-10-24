@@ -889,7 +889,7 @@ app.get('/api/product/:upc', async (req, res) => {
       variantTitle: product.variant_title,
       price: parseFloat(product.price),
       compareAtPrice: product.compare_at_price ? parseFloat(product.compare_at_price) : null,
-      cost: product.cost ? parseFloat(product.cost) : parseFloat(product.price) * 0.6,
+      cost: product.cost ? parseFloat(product.cost) : null, // Don't assume - return null if not available
       dailySales: parseInt(product.daily_sales) || 0,
       weeklySales: parseInt(product.weekly_sales) || 0,
       monthlySales: parseInt(product.monthly_sales) || 0,
