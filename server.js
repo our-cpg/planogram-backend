@@ -856,6 +856,7 @@ app.get('/api/product/:upc', async (req, res) => {
         
         if (storeName && accessToken && product.product_id) {
           const metafieldsUrl = `https://${storeName}/admin/api/2025-10/products/${product.product_id}/metafields.json`;
+          console.log(`🔍 Fetching metafields from: ${metafieldsUrl}`);
           const metafieldsResponse = await fetch(metafieldsUrl, {
             headers: {
               'X-Shopify-Access-Token': accessToken,
@@ -865,6 +866,9 @@ app.get('/api/product/:upc', async (req, res) => {
           
           if (metafieldsResponse.ok) {
             const metafieldsData = await metafieldsResponse.json();
+            console.log(`📦 Metafields received:`, metafieldsData.metafields?.length || 0, 'metafields');
+            console.log(`🔍 Looking for custom.vendor metafield...`);
+            
             const distributorMetafield = metafieldsData.metafields?.find(
               mf => mf.namespace === 'custom' && mf.key === 'vendor'
             );
@@ -877,7 +881,11 @@ app.get('/api/product/:upc', async (req, res) => {
                 [distributor, product.variant_id]
               );
               console.log(`✅ Fetched and saved distributor: ${distributor}`);
+            } else {
+              console.log(`⚠️ No custom.vendor metafield found`);
             }
+          } else {
+            console.log(`❌ Metafields fetch failed: ${metafieldsResponse.status}`);
           }
         }
       } catch (metafieldError) {
