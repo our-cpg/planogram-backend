@@ -550,7 +550,8 @@ async function importOrderData(storeName, accessToken) {
         ordersProcessed: 0,
         itemsProcessed: 0,
         ordersWithoutCustomers: 0,
-        message: 'No orders found. Add some orders to your Shopify store to enable BEAST MODE analytics!'
+        message: 'No orders found. Add some orders to your Shopify store to enable BEAST MODE analytics!',
+        analytics: null // No data to analyze
       };
     }
 
@@ -681,12 +682,74 @@ async function importOrderData(storeName, accessToken) {
     console.log(`✅🔥 BEAST MODE COMPLETE: ${ordersProcessed} orders, ${itemsProcessed} items processed!`);
     console.log(`📊 Orders without customers (guest checkouts): ${ordersWithoutCustomers}`);
 
+    // 📊 Calculate time-based analytics
+    console.log('📊 Calculating time-based analytics...');
+    const hourCounts = new Array(24).fill(0);
+    const dayCounts = { "1-5": 0, "6-10": 0, "11-15": 0, "16-20": 0, "21-25": 0, "26-31": 0 };
+
+    allOrders.forEach(order => {
+      const date = new Date(order.created_at);
+      const hour = date.getHours();
+      const day = date.getDate();
+      
+      // Count by hour (0-23)
+      hourCounts[hour]++;
+      
+      // Count by day range
+      if (day <= 5) dayCounts["1-5"]++;
+      else if (day <= 10) dayCounts["6-10"]++;
+      else if (day <= 15) dayCounts["11-15"]++;
+      else if (day <= 20) dayCounts["16-20"]++;
+      else if (day <= 25) dayCounts["21-25"]++;
+      else dayCounts["26-31"]++;
+    });
+
+    // Format hour labels
+    const hourLabels = [
+      "12am-1am", "1am-2am", "2am-3am", "3am-4am", "4am-5am", "5am-6am",
+      "6am-7am", "7am-8am", "8am-9am", "9am-10am", "10am-11am", "11am-12pm",
+      "12pm-1pm", "1pm-2pm", "2pm-3pm", "3pm-4pm", "4pm-5pm", "5pm-6pm",
+      "6pm-7pm", "7pm-8pm", "8pm-9pm", "9pm-10pm", "10pm-11pm", "11pm-12am"
+    ];
+
+    const byHour = hourCounts.map((count, hour) => ({
+      hour,
+      label: hourLabels[hour],
+      count
+    }));
+
+    // Format day ranges
+    const byDayOfMonth = Object.entries(dayCounts).map(([range, count]) => ({ 
+      range, 
+      count 
+    }));
+
+    // Calculate peaks
+    const maxHourly = Math.max(...hourCounts);
+    const maxDaily = Math.max(...Object.values(dayCounts));
+
+    const peakHourIndex = hourCounts.indexOf(maxHourly);
+    const peakHour = hourLabels[peakHourIndex];
+
+    const peakDayRange = Object.entries(dayCounts)
+      .reduce((a, b) => a[1] > b[1] ? a : b)[0];
+
+    console.log(`📊 Analytics calculated: Peak hour = ${peakHour}, Peak days = ${peakDayRange}`);
+
     return {
       success: true,
       ordersProcessed,
       itemsProcessed,
       ordersWithoutCustomers,
-      message: `Beast mode engaged! ${ordersProcessed} orders analyzed (${ordersWithoutCustomers} guest orders).`
+      message: `Beast mode engaged! ${ordersProcessed} orders analyzed (${ordersWithoutCustomers} guest orders).`,
+      analytics: {
+        byHour,
+        byDayOfMonth,
+        maxHourly,
+        maxDaily,
+        peakHour,
+        peakDayRange
+      }
     };
 
   } catch (error) {
@@ -803,7 +866,8 @@ app.post('/api/shopify', async (req, res) => {
         success: true, 
         message: result.message,
         ordersProcessed: result.ordersProcessed,
-        itemsProcessed: result.itemsProcessed
+        itemsProcessed: result.itemsProcessed,
+        analytics: result.analytics
       });
 
     } else {
