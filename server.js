@@ -858,17 +858,23 @@ app.post('/api/shopify', async (req, res) => {
       });
 
     } else if (action === 'refreshOrders') {
-      console.log('🔥🛒 BEAST MODE ORDER REFRESH REQUESTED...');
-      
-      const result = await importOrderData(storeName, accessToken);
-      
-      res.json({ 
-        success: true, 
-        message: result.message,
-        ordersProcessed: result.ordersProcessed,
-        itemsProcessed: result.itemsProcessed,
-        analytics: result.analytics
-      });
+  console.log('🔥🛒 BEAST MODE ORDER REFRESH REQUESTED...');
+  
+  // Start processing in background (don't await)
+  importOrderData(storeName, accessToken)
+    .then(result => {
+      console.log(`✅ Background processing complete: ${result.ordersProcessed} orders`);
+    })
+    .catch(error => {
+      console.error('❌ Background processing failed:', error);
+    });
+  
+  // Return immediately
+  res.json({ 
+    success: true, 
+    message: 'Order processing started in background.',
+    processing: true
+  });
 
     } else {
       res.status(400).json({ error: 'Invalid action' });
