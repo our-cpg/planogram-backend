@@ -1054,6 +1054,52 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// Get top product correlations (products bought together)
+app.get('/api/correlations', async (req, res) => {
+  try {
+    console.log('🤝 Fetching top product correlations...');
+    
+    const result = await pool.query(`
+      SELECT 
+        pa.title as product_a_name,
+        pa.variant_title as product_a_variant,
+        pa.barcode as product_a_upc,
+        pa.price as product_a_price,
+        pb.title as product_b_name,
+        pb.variant_title as product_b_variant,
+        pb.barcode as product_b_upc,
+        pb.price as product_b_price,
+        pc.co_purchase_count,
+        pc.correlation_score
+      FROM product_correlations pc
+      JOIN products pa ON pa.product_id = pc.product_a_id
+      JOIN products pb ON pb.product_id = pc.product_b_id
+      ORDER BY pc.co_purchase_count DESC, pc.correlation_score DESC
+      LIMIT 20
+    `);
+
+    const correlations = result.rows.map(r => ({
+      productA: {
+        name: r.product_a_variant ? `${r.product_a_name} - ${r.product_a_variant}` : r.product_a_name,
+        upc: r.product_a_upc,
+        price: parseFloat(r.product_a_price)
+      },
+      productB: {
+        name: r.product_b_variant ? `${r.product_b_name} - ${r.product_b_variant}` : r.product_b_name,
+        upc: r.product_b_upc,
+        price: parseFloat(r.product_b_price)
+      },
+      timesBoughtTogether: parseInt(r.co_purchase_count),
+      correlationScore: parseFloat(r.correlation_score)
+    }));
+
+    res.json({ correlations });
+  } catch (error) {
+    console.error('❌ Correlations error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 async function startServer() {
   console.log('🚀 Starting Planogram Backend v2.0 (Sales Tracking)...');
   await initDatabase();
