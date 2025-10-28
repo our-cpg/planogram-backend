@@ -499,17 +499,20 @@ async function importOrderData(storeName, accessToken) {
     let pageCount = 0;
     const MAX_PAGES = 50; // Limit to prevent infinite loops (50 pages * 250 = 12,500 orders)
 
-    // Fetch orders from Shopify - get ALL orders from the beginning
-    console.log('📅 Fetching ALL orders...');
-    while (hasNextPage && pageCount < MAX_PAGES) {
-      let url;
-      if (pageInfo) {
-        // When paginating, ONLY use page_info (no other params)
-        url = `https://${storeName}/admin/api/2024-10/orders.json?page_info=${pageInfo}`;
-      } else {
-        // First request: get all orders (no filters)
-        url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250`;
-      }
+   // Fetch orders from Shopify - get last 6 months only
+const sixMonthsAgo = new Date();
+sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+console.log(`📅 Fetching orders from last 6 months (since ${sixMonthsAgo.toISOString().split('T')[0]})...`);
+
+while (hasNextPage && pageCount < MAX_PAGES) {
+  let url;
+  if (pageInfo) {
+    // When paginating, ONLY use page_info (no other params)
+    url = `https://${storeName}/admin/api/2024-10/orders.json?page_info=${pageInfo}`;
+  } else {
+    // First request: get orders from last 6 months
+    url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&created_at_min=${sixMonthsAgo.toISOString()}`;
+  }
 
       const response = await fetch(url, {
         headers: {
