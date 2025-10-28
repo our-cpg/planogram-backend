@@ -31,6 +31,13 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
+// Track order processing status
+let orderProcessingStatus = {
+  isProcessing: false,
+  lastCompleted: null,
+  lastResult: null
+};
+
 // Initialize database tables with SAFE error handling
 async function initDatabase() {
   console.log('🔄 Initializing database...');
@@ -1104,6 +1111,19 @@ app.get('/api/correlations', async (req, res) => {
     console.error('❌ Correlations error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// Get order processing status
+app.get('/api/orders/status', (req, res) => {
+  res.json({
+    isProcessing: orderProcessingStatus.isProcessing,
+    lastCompleted: orderProcessingStatus.lastCompleted,
+    lastResult: orderProcessingStatus.lastResult ? {
+      ordersProcessed: orderProcessingStatus.lastResult.ordersProcessed,
+      itemsProcessed: orderProcessingStatus.lastResult.itemsProcessed,
+      analytics: orderProcessingStatus.lastResult.analytics
+    } : null
+  });
 });
 
 async function startServer() {
