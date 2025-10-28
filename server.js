@@ -864,24 +864,38 @@ app.post('/api/shopify', async (req, res) => {
         salesCount
       });
 
-    } else if (action === 'refreshOrders') {
-  console.log('🔥🛒 BEAST MODE ORDER REFRESH REQUESTED...');
-  
-  // Start processing in background (don't await)
-  importOrderData(storeName, accessToken)
-    .then(result => {
-      console.log(`✅ Background processing complete: ${result.ordersProcessed} orders`);
-    })
-    .catch(error => {
-      console.error('❌ Background processing failed:', error);
-    });
-  
-  // Return immediately
-  res.json({ 
-    success: true, 
-    message: 'Order processing started in background.',
-    processing: true
-  });
+   } else if (action === 'refreshOrders') {
+      console.log('🔥🛒 BEAST MODE ORDER REFRESH REQUESTED...');
+      
+      if (orderProcessingStatus.isProcessing) {
+        return res.json({
+          success: false,
+          message: 'Order processing already in progress. Please wait.',
+          processing: true
+        });
+      }
+      
+      orderProcessingStatus.isProcessing = true;
+      
+      // Start processing in background (don't await)
+      importOrderData(storeName, accessToken)
+        .then(result => {
+          console.log(`✅ Background processing complete: ${result.ordersProcessed} orders`);
+          orderProcessingStatus.isProcessing = false;
+          orderProcessingStatus.lastCompleted = new Date();
+          orderProcessingStatus.lastResult = result;
+        })
+        .catch(error => {
+          console.error('❌ Background processing failed:', error);
+          orderProcessingStatus.isProcessing = false;
+        });
+      
+      // Return immediately
+      res.json({ 
+        success: true, 
+        message: 'Order processing started in background. Check /api/orders/status for progress.',
+        processing: true
+      });
 
     } else {
       res.status(400).json({ error: 'Invalid action' });
