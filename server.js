@@ -1084,6 +1084,127 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// 🔥 NEW: Update Shopify inventory endpoint
+app.post('/api/shopify/update-inventory', async (req, res) => {
+  const { upc, quantity, storeName, accessToken } = req.body;
+  
+  console.log(`📤 Updating inventory for UPC ${upc} to ${quantity} units...`);
+  
+  if (!upc || quantity === undefined) {
+    return res.status(400).json({ error: 'UPC and quantity required' });
+  }
+  
+  try {
+    // First, find the product by UPC in our database
+    const productResult = await pool.query(
+      'SELECT variant_id, product_id, title FROM products WHERE barcode = $1 LIMIT 1',
+      [upc]
+    );
+    
+    if (productResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Product not found with that UPC' });
+    }
+    
+    const product = productResult.rows[0];
+    const variantId = product.variant_id;
+    
+    // Get Shopify credentials (from request or environment)
+    const store = storeName || process.env.SHOPIFY_STORE_NAME;
+    const token = accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
+    
+    if (!store || !token) {
+      return res.status(400).json({ error: 'Shopify credentials not provided' });
+    }
+    
+    const storeClean = store.replace('.myshopify.com', '');
+    
+    // First, get the inventory_item_id for this variant
+    const variantUrl = `https://${storeClean}.myshopify.com/admin/api/2025-10/variants/${variantId}.json`;
+    console.log(`🔍 Fetching variant info...`);
+    
+    const variantResponse = await fetch(variantUrl, {
+      headers: {
+        'X-Shopify-Access-Token': token,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!variantResponse.ok) {
+      const error = await variantResponse.text();
+      console.error(`❌ Failed to fetch variant: ${error}`);
+      return res.status(500).json({ error: 'Failed to fetch variant from Shopify' });
+    }
+    
+    const variantData = await variantResponse.json();
+    const inventoryItemId = variantData.variant.inventory_item_id;
+    
+    console.log(`📦 Found inventory_item_id: ${inventoryItemId}`);
+    
+    // Now get the location_id (first available location)
+    const locationsUrl = `https://${storeClean}.myshopify.com/admin/api/2025-10/locations.json`;
+    const locationsResponse = await fetch(locationsUrl, {
+      headers: {
+        'X-Shopify-Access-Token': token,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!locationsResponse.ok) {
+      return res.status(500).json({ error: 'Failed to fetch locations' });
+    }
+    
+    const locationsData = await locationsResponse.json();
+    const locationId = locationsData.locations[0].id;
+    
+    console.log(`📍 Using location_id: ${locationId}`);
+    
+    // Update the inventory using Inventory Level API
+    const inventoryUrl = `https://${storeClean}.myshopify.com/admin/api/2025-10/inventory_levels/set.json`;
+    console.log(`📤 Setting inventory to ${quantity}...`);
+    
+    const inventoryResponse = await fetch(inventoryUrl, {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        location_id: locationId,
+        inventory_item_id: inventoryItemId,
+        available: quantity
+      })
+    });
+    
+    if (!inventoryResponse.ok) {
+      const error = await inventoryResponse.text();
+      console.error(`❌ Failed to update inventory: ${error}`);
+      return res.status(500).json({ error: 'Failed to update inventory in Shopify' });
+    }
+    
+    // Update our local database
+    await pool.query(
+      'UPDATE products SET inventory_quantity = $1, updated_at = NOW() WHERE variant_id = $2',
+      [quantity, variantId]
+    );
+    
+    console.log(`✅ Successfully updated inventory for ${product.title} to ${quantity} units`);
+    
+    res.json({ 
+      success: true, 
+      message: `Updated ${product.title} to ${quantity} units`,
+      product: {
+        title: product.title,
+        variantId: variantId,
+        newQuantity: quantity
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating inventory:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get top product correlations (products bought together)
 app.get('/api/correlations', async (req, res) => {
   try {
