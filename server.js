@@ -1153,6 +1153,287 @@ async function startServer() {
   });
 }
 
+// ========================================
+// 💰 DISCOUNT CODE CREATION ENDPOINT
+// ========================================
+app.post('/api/shopify/discount', async (req, res) => {
+  const { 
+    storeName, 
+    accessToken, 
+    discountCode, 
+    discountType, 
+    discountValue,
+    startDate,
+    endDate,
+    variantIds,
+    automatic = false
+  } = req.body;
+
+  if (!storeName || !accessToken || !discountCode || !discountType || !discountValue) {
+    return res.status(400).json({ 
+      error: 'Missing required fields',
+      required: ['storeName', 'accessToken', 'discountCode', 'discountType', 'discountValue']
+    });
+  }
+
+  console.log(`🎫 Creating ${automatic ? 'automatic' : 'manual'} discount: ${discountCode}`);
+
+  try {
+    const storeNameClean = storeName.replace('.myshopify.com', '');
+    
+    // Calculate discount value for Shopify API
+    let valueType;
+    let value;
+
+    if (discountType === 'percentage') {
+      valueType = 'percentage';
+      value = `-${discountValue}`; // Shopify uses negative values for discounts
+    } else {
+      valueType = 'fixed_amount';
+      value = `-${discountValue}`;
+    }
+
+    if (automatic) {
+      // Create automatic discount (no code, applies automatically)
+      const url = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/price_rules.json`;
+
+      const priceRulePayload = {
+        price_rule: {
+          title: discountCode,
+          target_type: variantIds && variantIds.length > 0 ? 'line_item' : 'line_item',
+          target_selection: variantIds && variantIds.length > 0 ? 'entitled' : 'all',
+          allocation_method: 'across',
+          value_type: valueType,
+          value: value,
+          customer_selection: 'all',
+          starts_at: startDate ? new Date(startDate).toISOString() : new Date().toISOString(),
+          ends_at: endDate ? new Date(endDate).toISOString() : null,
+          usage_limit: null,
+          prerequisite_subtotal_range: null
+        }
+      };
+
+      // Add variant IDs if targeting specific products
+      if (variantIds && variantIds.length > 0) {
+        priceRulePayload.price_rule.entitled_variant_ids = variantIds;
+      }
+
+      const priceRuleResponse = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': accessToken,
+        },
+        body: JSON.stringify(priceRulePayload)
+      });
+
+      if (!priceRuleResponse.ok) {
+        const errorText = await priceRuleResponse.text();
+        console.error('Shopify automatic discount error:', errorText);
+        return res.status(priceRuleResponse.status).json({ 
+          error: 'Failed to create automatic discount in Shopify',
+          details: errorText 
+        });
+      }
+
+      const priceRuleData = await priceRuleResponse.json();
+      const priceRuleId = priceRuleData.price_rule.id;
+
+      console.log(`✅ Automatic discount created: ${priceRuleId}`);
+
+      res.json({
+        success: true,
+        message: `Automatic discount "${discountCode}" created successfully`,
+        priceRuleId: priceRuleId,
+        automatic: true
+      });
+
+    } else {
+      // Create manual discount code (requires code entry)
+      const url = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/price_rules.json`;
+
+      const priceRulePayload = {
+        price_rule: {
+          title: discountCode,
+          target_type: variantIds && variantIds.length > 0 ? 'line_item' : 'line_item',
+          target_selection: variantIds && variantIds.length > 0 ? 'entitled' : 'all',
+          allocation_method: 'across',
+          value_type: valueType,
+          value: value,
+          customer_selection: 'all',
+          starts_at: startDate ? new Date(startDate).toISOString() : new Date().toISOString(),
+          ends_at: endDate ? new Date(endDate).toISOString() : null,
+          usage_limit: null
+        }
+      };
+
+      // Add variant IDs if targeting specific products
+      if (variantIds && variantIds.length > 0) {
+        priceRulePayload.price_rule.entitled_variant_ids = variantIds;
+      }
+
+      // Create price rule
+      const priceRuleResponse = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': accessToken,
+        },
+        body: JSON.stringify(priceRulePayload)
+      });
+
+      if (!priceRuleResponse.ok) {
+        const errorText = await priceRuleResponse.text();
+        console.error('Shopify price rule error:', errorText);
+        return res.status(priceRuleResponse.status).json({ 
+          error: 'Failed to create price rule in Shopify',
+          details: errorText 
+        });
+      }
+
+      const priceRuleData = await priceRuleResponse.json();
+      const priceRuleId = priceRuleData.price_rule.id;
+
+      console.log(`✅ Price rule created: ${priceRuleId}`);
+
+      // Create discount code
+      const discountCodeUrl = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/price_rules/${priceRuleId}/discount_codes.json`;
+      
+      const discountCodePayload = {
+        discount_code: {
+          code: discountCode
+        }
+      };
+
+      const discountCodeResponse = await fetch(discountCodeUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': accessToken,
+        },
+        body: JSON.stringify(discountCodePayload)
+      });
+
+      if (!discountCodeResponse.ok) {
+        const errorText = await discountCodeResponse.text();
+        console.error('Shopify discount code error:', errorText);
+        return res.status(discountCodeResponse.status).json({ 
+          error: 'Failed to create discount code in Shopify',
+          details: errorText 
+        });
+      }
+
+      const discountCodeData = await discountCodeResponse.json();
+
+      console.log(`✅ Discount code created: ${discountCode}`);
+
+      res.json({
+        success: true,
+        message: `Discount code "${discountCode}" created successfully`,
+        priceRuleId: priceRuleId,
+        discountCodeId: discountCodeData.discount_code.id,
+        code: discountCodeData.discount_code.code,
+        automatic: false
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Error creating discount:', error);
+    res.status(500).json({ 
+      error: 'Failed to create discount',
+      details: error.message 
+    });
+  }
+});
+
+// ========================================
+// 💰 UPDATE PRODUCT PRICES (COMPARE AT PRICE)
+// ========================================
+app.post('/api/shopify/update-prices', async (req, res) => {
+  const { storeName, accessToken, products } = req.body;
+
+  if (!storeName || !accessToken || !products || !Array.isArray(products)) {
+    return res.status(400).json({ 
+      error: 'Missing required fields',
+      required: ['storeName', 'accessToken', 'products (array)']
+    });
+  }
+
+  console.log(`💰 Updating ${products.length} product prices with compare at price`);
+
+  try {
+    const storeNameClean = storeName.replace('.myshopify.com', '');
+    let successCount = 0;
+    let errorCount = 0;
+    const errors = [];
+
+    // Update each product variant
+    for (const product of products) {
+      if (!product.variantId) {
+        errorCount++;
+        errors.push(`Missing variant ID for product`);
+        continue;
+      }
+
+      try {
+        const url = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/variants/${product.variantId}.json`;
+
+        const payload = {
+          variant: {
+            id: product.variantId,
+            price: product.newPrice.toFixed(2),
+            compare_at_price: product.compareAtPrice.toFixed(2)
+          }
+        };
+
+        const response = await fetch(url, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': accessToken,
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (response.ok) {
+          successCount++;
+          console.log(`✅ Updated variant ${product.variantId}: $${product.newPrice} (was $${product.compareAtPrice})`);
+        } else {
+          const errorText = await response.text();
+          errorCount++;
+          errors.push(`Variant ${product.variantId}: ${errorText}`);
+          console.error(`❌ Failed to update variant ${product.variantId}:`, errorText);
+        }
+
+        // Rate limiting: small delay between requests
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+      } catch (error) {
+        errorCount++;
+        errors.push(`Variant ${product.variantId}: ${error.message}`);
+        console.error(`❌ Error updating variant ${product.variantId}:`, error);
+      }
+    }
+
+    console.log(`✅ Price update complete: ${successCount} succeeded, ${errorCount} failed`);
+
+    res.json({
+      success: true,
+      message: `Updated ${successCount} of ${products.length} products`,
+      updated: successCount,
+      failed: errorCount,
+      errors: errors.length > 0 ? errors : undefined
+    });
+
+  } catch (error) {
+    console.error('❌ Error updating prices:', error);
+    res.status(500).json({ 
+      error: 'Failed to update prices',
+      details: error.message 
+    });
+  }
+});
+
 pool.query('SELECT NOW()', (err, res) => {
   if (err) {
     console.error('❌ Database connection failed:', err);
