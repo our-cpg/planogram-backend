@@ -320,6 +320,11 @@ async function importProducts(storeName, accessToken) {
     }
 
     console.log(`✅ Import complete! ${totalInserted} products inserted, ${totalSkipped} skipped`);
+    
+    // Now fetch inventory levels for all products
+    console.log('📦 Fetching inventory levels...');
+    await updateInventoryLevels(storeName, accessToken);
+    
     return { 
       success: true, 
       message: `Successfully imported ${totalInserted} products (${totalSkipped} skipped)`,
@@ -329,6 +334,96 @@ async function importProducts(storeName, accessToken) {
 
   } catch (error) {
     console.error('❌ Import failed:', error);
+    throw error;
+  }
+}
+
+// NEW: Fetch actual inventory levels from Shopify InventoryLevel API
+async function updateInventoryLevels(storeName, accessToken) {
+  console.log('📦 Updating inventory levels from Shopify...');
+  
+  try {
+    const storeNameClean = storeName.replace('.myshopify.com', '');
+    
+    // Get all products from database
+    const productsResult = await pool.query('SELECT variant_id FROM products');
+    const variantIds = productsResult.rows.map(r => r.variant_id);
+    
+    console.log(`📊 Found ${variantIds.length} variants to update`);
+    
+    // Fetch inventory levels in batches of 50
+    const batchSize = 50;
+    let updatedCount = 0;
+    
+    for (let i = 0; i < variantIds.length; i += batchSize) {
+      const batch = variantIds.slice(i, i + batchSize);
+      const inventoryItemIds = [];
+      
+      // First, get inventory_item_id for each variant
+      for (const variantId of batch) {
+        try {
+          const variantUrl = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/variants/${variantId}.json`;
+          const variantResponse = await fetch(variantUrl, {
+            headers: {
+              'X-Shopify-Access-Token': accessToken,
+              'Content-Type': 'application/json'
+            }
+          });
+          
+          if (variantResponse.ok) {
+            const variantData = await variantResponse.json();
+            inventoryItemIds.push({
+              variantId: variantId,
+              inventoryItemId: variantData.variant.inventory_item_id
+            });
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, 100)); // Rate limiting
+        } catch (error) {
+          console.error(`❌ Error fetching variant ${variantId}:`, error.message);
+        }
+      }
+      
+      // Now fetch inventory levels for these inventory items
+      for (const item of inventoryItemIds) {
+        try {
+          const inventoryUrl = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/inventory_levels.json?inventory_item_ids=${item.inventoryItemId}`;
+          const inventoryResponse = await fetch(inventoryUrl, {
+            headers: {
+              'X-Shopify-Access-Token': accessToken,
+              'Content-Type': 'application/json'
+            }
+          });
+          
+          if (inventoryResponse.ok) {
+            const inventoryData = await inventoryResponse.json();
+            const totalQuantity = inventoryData.inventory_levels.reduce((sum, level) => {
+              return sum + (level.available || 0);
+            }, 0);
+            
+            // Update database
+            await pool.query(
+              'UPDATE products SET inventory_quantity = $1, updated_at = NOW() WHERE variant_id = $2',
+              [totalQuantity, item.variantId]
+            );
+            
+            updatedCount++;
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, 100)); // Rate limiting
+        } catch (error) {
+          console.error(`❌ Error fetching inventory for variant ${item.variantId}:`, error.message);
+        }
+      }
+      
+      console.log(`📦 Progress: ${Math.min(i + batchSize, variantIds.length)}/${variantIds.length} variants processed`);
+    }
+    
+    console.log(`✅ Inventory update complete! ${updatedCount} variants updated`);
+    return { success: true, updated: updatedCount };
+    
+  } catch (error) {
+    console.error('❌ Inventory update failed:', error);
     throw error;
   }
 }
@@ -867,6 +962,19 @@ app.post('/api/shopify', async (req, res) => {
         salesCount
       });
 
+    } else if (action === 'refreshInventory') {
+      console.log('📦 INVENTORY REFRESH REQUESTED...');
+      
+      const result = await updateInventoryLevels(storeName, accessToken);
+      
+      console.log(`✅ Inventory levels updated: ${result.updated} variants`);
+      
+      res.json({ 
+        success: true, 
+        message: `Inventory updated! ${result.updated} products refreshed`,
+        updatedCount: result.updated
+      });
+
    } else if (action === 'refreshOrders') {
       console.log('🔥🛒 BEAST MODE ORDER REFRESH REQUESTED...');
       
@@ -1064,6 +1172,92 @@ app.get('/api/product/:upc', async (req, res) => {
     console.error('❌ Database error:', error);
     console.error('Stack:', error.stack);
     res.status(500).json({ error: 'Database query failed', details: error.message });
+  }
+});
+
+// Get all products with forecasting data
+app.get('/api/products/all', async (req, res) => {
+  try {
+    console.log('📊 Fetching all products with forecasting data...');
+    
+    const result = await pool.query(`
+      SELECT 
+        p.variant_id,
+        p.product_id,
+        p.title,
+        p.variant_title,
+        p.barcode,
+        p.sku,
+        p.price,
+        p.cost,
+        p.inventory_quantity,
+        p.vendor,
+        p.tags,
+        COALESCE(s.daily_sales, 0) as daily_sales,
+        COALESCE(s.weekly_sales, 0) as weekly_sales,
+        COALESCE(s.monthly_sales, 0) as monthly_sales,
+        COALESCE(s.all_time_sales, 0) as all_time_sales
+      FROM products p
+      LEFT JOIN sales_data s ON p.variant_id = s.variant_id
+      ORDER BY p.title, p.variant_title
+    `);
+    
+    const products = result.rows.map(row => {
+      const stock = parseInt(row.inventory_quantity) || 0;
+      const velocity = parseFloat(row.daily_sales) || 0;
+      const daysLeft = velocity > 0 ? Math.floor(stock / velocity) : (stock > 0 ? 999 : 0);
+      
+      // Determine risk level
+      let risk = 'LOW';
+      if (daysLeft < 0) risk = 'CRITICAL';
+      else if (daysLeft <= 3) risk = 'CRITICAL';
+      else if (daysLeft <= 7) risk = 'HIGH';
+      else if (daysLeft <= 14) risk = 'MEDIUM';
+      
+      return {
+        variantId: row.variant_id,
+        productId: row.product_id,
+        title: row.title,
+        variantTitle: row.variant_title,
+        barcode: row.barcode,
+        sku: row.sku,
+        price: parseFloat(row.price) || 0,
+        cost: parseFloat(row.cost) || 0,
+        stock: stock,
+        velocity: velocity,
+        daysLeft: daysLeft,
+        risk: risk,
+        vendor: row.vendor,
+        tags: row.tags,
+        dailySales: parseInt(row.daily_sales) || 0,
+        weeklySales: parseInt(row.weekly_sales) || 0,
+        monthlySales: parseInt(row.monthly_sales) || 0,
+        allTimeSales: parseInt(row.all_time_sales) || 0
+      };
+    });
+    
+    // Calculate summary stats
+    const criticalCount = products.filter(p => p.daysLeft <= 3).length;
+    const highRiskCount = products.filter(p => p.daysLeft > 3 && p.daysLeft <= 7).length;
+    const totalProducts = products.length;
+    const avgVelocity = products.reduce((sum, p) => sum + p.velocity, 0) / totalProducts;
+    
+    console.log(`✅ Returned ${totalProducts} products`);
+    console.log(`📊 Critical: ${criticalCount}, High Risk: ${highRiskCount}`);
+    
+    res.json({
+      products: products,
+      summary: {
+        totalProducts: totalProducts,
+        criticalAlerts: criticalCount,
+        highRisk: highRiskCount,
+        avgVelocity: avgVelocity.toFixed(2)
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error fetching products:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
