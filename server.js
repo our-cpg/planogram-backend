@@ -1286,7 +1286,9 @@ app.get('/api/product/:upc', async (req, res) => {
       allTimeSales: parseInt(product.all_time_sales) || 0,
       barcode: product.barcode,
       sku: product.sku,
-      inventoryQuantity: parseInt(product.inventory_quantity) || 0,
+      inventoryQuantity: product.inventory_quantity !== null && product.inventory_quantity !== undefined 
+        ? parseInt(product.inventory_quantity) 
+        : 0,
       vendor: product.vendor,
       distributor: distributor,
       tags: product.tags,
@@ -1307,6 +1309,150 @@ app.get('/api/product/:upc', async (req, res) => {
     console.error('❌ Database error:', error);
     console.error('Stack:', error.stack);
     res.status(500).json({ error: 'Database query failed', details: error.message });
+  }
+});
+
+// NEW: Get LIVE inventory directly from Shopify (not database)
+app.get('/api/shopify/live-inventory/:upc', async (req, res) => {
+  const { upc } = req.params;
+  const storeName = req.query.storeName || process.env.SHOPIFY_STORE_NAME;
+  const accessToken = req.query.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
+  
+  if (!storeName || !accessToken) {
+    return res.status(400).json({ error: 'Missing Shopify credentials' });
+  }
+  
+  console.log(`🔴 LIVE FETCH from Shopify for UPC: ${upc}`);
+  
+  try {
+    const storeNameClean = storeName.replace('.myshopify.com', '');
+    
+    // First, get the product by barcode to find variant ID
+    const searchQuery = `
+      query getProductByBarcode($barcode: String!) {
+        productVariants(first: 1, query: $barcode) {
+          edges {
+            node {
+              id
+              title
+              barcode
+              inventoryQuantity
+              price
+              compareAtPrice
+              sku
+              product {
+                id
+                title
+                vendor
+                tags
+                createdAt
+              }
+              inventoryItem {
+                id
+                tracked
+              }
+            }
+          }
+        }
+      }
+    `;
+    
+    const graphqlUrl = `https://${storeNameClean}.myshopify.com/admin/api/2024-01/graphql.json`;
+    const response = await fetch(graphqlUrl, {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': accessToken,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query: searchQuery,
+        variables: { barcode: `barcode:${upc}` }
+      })
+    });
+    
+    if (!response.ok) {
+      console.error(`❌ Shopify API error: ${response.status}`);
+      return res.status(response.status).json({ error: 'Shopify API error' });
+    }
+    
+    const result = await response.json();
+    
+    if (result.errors) {
+      console.error('❌ GraphQL errors:', result.errors);
+      return res.status(500).json({ error: 'GraphQL query failed', details: result.errors });
+    }
+    
+    const edges = result.data?.productVariants?.edges || [];
+    
+    if (edges.length === 0) {
+      console.log(`❌ No product found with barcode: ${upc}`);
+      return res.status(404).json({ error: 'Product not found in Shopify' });
+    }
+    
+    const variant = edges[0].node;
+    const product = variant.product;
+    
+    // Get the numeric variant ID from the GID
+    const variantId = variant.id.split('/').pop();
+    
+    // Now get sales data from our database (if available)
+    let salesData = {
+      dailySales: 0,
+      weeklySales: 0,
+      monthlySales: 0,
+      quarterlySales: 0,
+      yearlySales: 0,
+      allTimeSales: 0
+    };
+    
+    try {
+      const dbResult = await pool.query(`
+        SELECT 
+          COALESCE(s.daily_sales, 0) as daily_sales,
+          COALESCE(s.weekly_sales, 0) as weekly_sales,
+          COALESCE(s.monthly_sales, 0) as monthly_sales,
+          COALESCE(s.quarterly_sales, 0) as quarterly_sales,
+          COALESCE(s.yearly_sales, 0) as yearly_sales,
+          COALESCE(s.all_time_sales, 0) as all_time_sales
+        FROM sales_data s
+        WHERE s.variant_id = $1
+      `, [variantId]);
+      
+      if (dbResult.rows.length > 0) {
+        const row = dbResult.rows[0];
+        salesData = {
+          dailySales: parseInt(row.daily_sales) || 0,
+          weeklySales: parseInt(row.weekly_sales) || 0,
+          monthlySales: parseInt(row.monthly_sales) || 0,
+          quarterlySales: parseInt(row.quarterly_sales) || 0,
+          yearlySales: parseInt(row.yearly_sales) || 0,
+          allTimeSales: parseInt(row.all_time_sales) || 0
+        };
+      }
+    } catch (dbError) {
+      console.log('⚠️ Could not fetch sales data from database:', dbError.message);
+    }
+    
+    console.log(`✅ LIVE from Shopify: ${product.title} - Stock: ${variant.inventoryQuantity}`);
+    
+    res.json({
+      title: product.title,
+      variantTitle: variant.title !== 'Default Title' ? variant.title : null,
+      price: parseFloat(variant.price),
+      compareAtPrice: variant.compareAtPrice ? parseFloat(variant.compareAtPrice) : null,
+      barcode: variant.barcode,
+      sku: variant.sku,
+      inventoryQuantity: variant.inventoryQuantity, // LIVE from Shopify!
+      vendor: product.vendor,
+      tags: Array.isArray(product.tags) ? product.tags.join(', ') : product.tags,
+      createdAt: product.createdAt,
+      ...salesData,
+      source: 'shopify_live'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error fetching live inventory:', error);
+    res.status(500).json({ error: 'Failed to fetch live inventory', details: error.message });
   }
 });
 
@@ -1338,7 +1484,9 @@ app.get('/api/products/all', async (req, res) => {
     `);
     
     const products = result.rows.map(row => {
-      const stock = parseInt(row.inventory_quantity) || 0;
+      const stock = row.inventory_quantity !== null && row.inventory_quantity !== undefined 
+        ? parseInt(row.inventory_quantity) 
+        : 0;
       const velocity = parseFloat(row.daily_sales) || 0;
       const daysLeft = velocity > 0 ? Math.floor(stock / velocity) : (stock > 0 ? 999 : 0);
       
