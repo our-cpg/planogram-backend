@@ -338,7 +338,7 @@ async function importProducts(storeName, accessToken) {
   }
 }
 
-// NEW: Fetch actual inventory levels from Shopify InventoryLevel API
+// NEW: Fetch actual inventory levels from Shopify InventoryLevel API with improved rate limiting
 async function updateInventoryLevels(storeName, accessToken) {
   console.log('📦 Updating inventory levels from Shopify...');
   
@@ -362,12 +362,13 @@ async function updateInventoryLevels(storeName, accessToken) {
     let errorCount = 0;
     const totalBatches = Math.ceil(variantIds.length / batchSize);
     
-    for (let i = 0; i < variantIds.length; i += batchSize) {
-      const batch = variantIds.slice(i, i + batchSize);
-      const batchNumber = Math.floor(i / batchSize) + 1;
+    // Helper function to process a single batch with retry logic
+    const processBatch = async (batch, batchNumber, retryCount = 0) => {
+      const maxRetries = 3;
+      const baseDelay = 2000; // Start with 2 seconds
       
       try {
-        console.log(`⏳ Processing batch ${batchNumber}/${totalBatches} (${batch.length} variants)`);
+        console.log(`⏳ Processing batch ${batchNumber}/${totalBatches} (${batch.length} variants)${retryCount > 0 ? ` [Retry ${retryCount}]` : ''}`);
         
         // GraphQL query to get inventory for all variants in batch at once
         const graphqlQuery = `
@@ -402,17 +403,50 @@ async function updateInventoryLevels(storeName, accessToken) {
           })
         });
         
+        // Check Shopify rate limit headers
+        const rateLimitCost = response.headers.get('X-GraphQL-Cost-Include-Fields');
+        const rateLimitRemaining = response.headers.get('X-Shopify-Shop-Api-Call-Limit');
+        
+        if (rateLimitRemaining) {
+          const [used, total] = rateLimitRemaining.split('/').map(Number);
+          const percentUsed = (used / total) * 100;
+          
+          // If we're using >80% of rate limit, slow down
+          if (percentUsed > 80) {
+            console.log(`⚠️ Rate limit at ${percentUsed.toFixed(1)}% (${used}/${total}), adding extra delay...`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+        
+        // Handle rate limit response
+        if (response.status === 429) {
+          const retryAfter = response.headers.get('Retry-After');
+          const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : baseDelay * Math.pow(2, retryCount);
+          
+          console.log(`⏸️ Rate limit hit (429). Waiting ${waitTime / 1000}s before retry...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          
+          // Retry this batch
+          if (retryCount < maxRetries) {
+            return await processBatch(batch, batchNumber, retryCount + 1);
+          } else {
+            console.error(`❌ Max retries (${maxRetries}) reached for batch ${batchNumber}`);
+            return { success: false, updatedInBatch: 0, errorCount: batch.length };
+          }
+        }
+        
         if (!response.ok) {
           const errorText = await response.text();
           console.error(`❌ GraphQL request failed (${response.status}):`, errorText);
-          errorCount += batch.length;
           
-          // If rate limited, wait 5 seconds
-          if (response.status === 429) {
-            console.log('⏸️ Rate limit hit, waiting 5 seconds...');
-            await new Promise(resolve => setTimeout(resolve, 5000));
+          // For non-429 errors, maybe retry once
+          if (retryCount < 1) {
+            console.log(`🔄 Retrying batch ${batchNumber} after non-429 error...`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            return await processBatch(batch, batchNumber, retryCount + 1);
           }
-          continue;
+          
+          return { success: false, updatedInBatch: 0, errorCount: batch.length };
         }
         
         const result = await response.json();
@@ -420,17 +454,32 @@ async function updateInventoryLevels(storeName, accessToken) {
         // Check for GraphQL errors
         if (result.errors) {
           console.error('❌ GraphQL errors:', result.errors);
-          errorCount += batch.length;
-          continue;
+          
+          // Check if it's a throttling error
+          const isThrottled = result.errors.some(err => 
+            err.message && (err.message.includes('throttled') || err.message.includes('rate limit'))
+          );
+          
+          if (isThrottled && retryCount < maxRetries) {
+            const waitTime = baseDelay * Math.pow(2, retryCount);
+            console.log(`⏸️ Throttling detected in GraphQL response. Waiting ${waitTime / 1000}s...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            return await processBatch(batch, batchNumber, retryCount + 1);
+          }
+          
+          return { success: false, updatedInBatch: 0, errorCount: batch.length };
         }
         
         // Update database for all variants in batch
         const nodes = result.data?.nodes || [];
+        let updatedInBatch = 0;
+        let errorsInBatch = 0;
         
         for (let j = 0; j < nodes.length; j++) {
           const node = nodes[j];
           if (!node) {
             console.warn(`⚠️ Null node at index ${j} in batch ${batchNumber}`);
+            errorsInBatch++;
             continue;
           }
           
@@ -443,29 +492,47 @@ async function updateInventoryLevels(storeName, accessToken) {
               'UPDATE products SET inventory_quantity = $1, updated_at = NOW() WHERE variant_id = $2',
               [inventoryQuantity, variantId]
             );
-            updatedCount++;
+            updatedInBatch++;
           } catch (dbError) {
             console.error(`❌ Database error for variant ${variantId}:`, dbError.message);
-            errorCount++;
+            errorsInBatch++;
           }
         }
         
-        console.log(`✅ Batch ${batchNumber}/${totalBatches} complete (${updatedCount} total updated)`);
+        console.log(`✅ Batch ${batchNumber}/${totalBatches} complete (${updatedInBatch} updated in batch)`);
         
-        // Rate limiting: wait 500ms between batches (Shopify allows 2 req/sec)
-        if (i + batchSize < variantIds.length) {
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
+        return { success: true, updatedInBatch, errorCount: errorsInBatch };
         
       } catch (error) {
         console.error(`❌ Error processing batch ${batchNumber}:`, error.message);
-        errorCount += batch.length;
         
         // Handle rate limits with exponential backoff
-        if (error.message.includes('429') || error.message.includes('rate limit')) {
-          console.log('⏸️ Rate limit detected, waiting 5 seconds...');
-          await new Promise(resolve => setTimeout(resolve, 5000));
+        if (error.message.includes('429') || error.message.includes('rate limit') || error.message.includes('throttled')) {
+          if (retryCount < maxRetries) {
+            const waitTime = baseDelay * Math.pow(2, retryCount);
+            console.log(`⏸️ Rate limit detected. Waiting ${waitTime / 1000}s before retry ${retryCount + 1}/${maxRetries}...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            return await processBatch(batch, batchNumber, retryCount + 1);
+          }
         }
+        
+        return { success: false, updatedInBatch: 0, errorCount: batch.length };
+      }
+    };
+    
+    // Process all batches
+    for (let i = 0; i < variantIds.length; i += batchSize) {
+      const batch = variantIds.slice(i, i + batchSize);
+      const batchNumber = Math.floor(i / batchSize) + 1;
+      
+      const result = await processBatch(batch, batchNumber);
+      updatedCount += result.updatedInBatch;
+      errorCount += result.errorCount;
+      
+      // Dynamic delay between batches based on progress
+      if (i + batchSize < variantIds.length) {
+        // Standard delay: 500ms (allows ~2 req/sec for GraphQL)
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
     }
     
