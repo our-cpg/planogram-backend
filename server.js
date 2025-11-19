@@ -1456,6 +1456,165 @@ app.get('/api/shopify/live-inventory/:upc', async (req, res) => {
   }
 });
 
+// NEW: Get ALL products with LIVE inventory from Shopify (not database!)
+app.get('/api/shopify/live-products-all', async (req, res) => {
+  const storeName = req.query.storeName || process.env.SHOPIFY_STORE_NAME;
+  const accessToken = req.query.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
+  
+  if (!storeName || !accessToken) {
+    return res.status(400).json({ error: 'Missing Shopify credentials' });
+  }
+  
+  console.log('🔴 FETCHING ALL PRODUCTS WITH LIVE INVENTORY FROM SHOPIFY');
+  
+  try {
+    const storeNameClean = storeName.replace('.myshopify.com', '');
+    
+    let allProducts = [];
+    let hasNextPage = true;
+    let cursor = null;
+    let pageCount = 0;
+    
+    while (hasNextPage) {
+      pageCount++;
+      console.log(`📦 Fetching page ${pageCount}...`);
+      
+      const query = `
+        query getProductsWithInventory($cursor: String) {
+          productVariants(first: 250, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            edges {
+              node {
+                id
+                title
+                barcode
+                sku
+                price
+                inventoryQuantity
+                product {
+                  id
+                  title
+                  vendor
+                  tags
+                }
+              }
+            }
+          }
+        }
+      `;
+      
+      const response = await fetch(`https://${storeNameClean}.myshopify.com/admin/api/2024-01/graphql.json`, {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': accessToken,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          query: query,
+          variables: cursor ? { cursor } : {}
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Shopify API error: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      
+      if (result.errors) {
+        console.error('GraphQL errors:', result.errors);
+        throw new Error('GraphQL query failed');
+      }
+      
+      const edges = result.data?.productVariants?.edges || [];
+      
+      for (const edge of edges) {
+        const variant = edge.node;
+        const product = variant.product;
+        
+        // Get sales data from database if available
+        const variantId = variant.id.split('/').pop();
+        let salesData = {
+          dailySales: 0,
+          weeklySales: 0,
+          monthlySales: 0,
+          allTimeSales: 0
+        };
+        
+        try {
+          const dbResult = await pool.query(`
+            SELECT 
+              COALESCE(s.daily_sales, 0) as daily_sales,
+              COALESCE(s.weekly_sales, 0) as weekly_sales,
+              COALESCE(s.monthly_sales, 0) as monthly_sales,
+              COALESCE(s.all_time_sales, 0) as all_time_sales
+            FROM sales_data s
+            WHERE s.variant_id = $1
+          `, [variantId]);
+          
+          if (dbResult.rows.length > 0) {
+            const row = dbResult.rows[0];
+            salesData = {
+              dailySales: parseInt(row.daily_sales) || 0,
+              weeklySales: parseInt(row.weekly_sales) || 0,
+              monthlySales: parseInt(row.monthly_sales) || 0,
+              allTimeSales: parseInt(row.all_time_sales) || 0
+            };
+          }
+        } catch (dbError) {
+          // Continue without sales data if DB lookup fails
+        }
+        
+        allProducts.push({
+          variantId: variantId,
+          title: product.title,
+          variantTitle: variant.title !== 'Default Title' ? variant.title : null,
+          barcode: variant.barcode,
+          sku: variant.sku,
+          price: parseFloat(variant.price) || 0,
+          stock: variant.inventoryQuantity, // LIVE from Shopify!
+          vendor: product.vendor,
+          tags: Array.isArray(product.tags) ? product.tags.join(', ') : product.tags,
+          ...salesData,
+          source: 'shopify_live'
+        });
+      }
+      
+      const pageInfo = result.data?.productVariants?.pageInfo;
+      hasNextPage = pageInfo?.hasNextPage || false;
+      cursor = pageInfo?.endCursor;
+      
+      // Rate limiting
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    console.log(`✅ Fetched ${allProducts.length} products with LIVE inventory from Shopify`);
+    
+    // Calculate summary
+    const criticalCount = allProducts.filter(p => {
+      const velocity = p.dailySales || 0;
+      const daysLeft = velocity > 0 ? Math.floor(p.stock / velocity) : (p.stock > 0 ? 999 : 0);
+      return daysLeft <= 3;
+    }).length;
+    
+    res.json({
+      products: allProducts,
+      summary: {
+        totalProducts: allProducts.length,
+        criticalAlerts: criticalCount,
+        source: 'shopify_live'
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error fetching live products:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get all products with forecasting data
 app.get('/api/products/all', async (req, res) => {
   try {
