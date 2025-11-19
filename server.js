@@ -351,76 +351,135 @@ async function updateInventoryLevels(storeName, accessToken) {
     
     console.log(`📊 Found ${variantIds.length} variants to update`);
     
-    // Fetch inventory levels in batches of 50
+    if (variantIds.length === 0) {
+      console.log('⚠️ No variants found in database');
+      return { success: true, updated: 0 };
+    }
+    
+    // Process in batches of 50 using GraphQL
     const batchSize = 50;
     let updatedCount = 0;
+    let errorCount = 0;
+    const totalBatches = Math.ceil(variantIds.length / batchSize);
     
     for (let i = 0; i < variantIds.length; i += batchSize) {
       const batch = variantIds.slice(i, i + batchSize);
-      const inventoryItemIds = [];
+      const batchNumber = Math.floor(i / batchSize) + 1;
       
-      // First, get inventory_item_id for each variant
-      for (const variantId of batch) {
-        try {
-          const variantUrl = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/variants/${variantId}.json`;
-          const variantResponse = await fetch(variantUrl, {
-            headers: {
-              'X-Shopify-Access-Token': accessToken,
-              'Content-Type': 'application/json'
+      try {
+        console.log(`⏳ Processing batch ${batchNumber}/${totalBatches} (${batch.length} variants)`);
+        
+        // GraphQL query to get inventory for all variants in batch at once
+        const graphqlQuery = `
+          query getInventoryLevels($ids: [ID!]!) {
+            nodes(ids: $ids) {
+              ... on ProductVariant {
+                id
+                inventoryQuantity
+                inventoryItem {
+                  id
+                  tracked
+                }
+              }
             }
-          });
+          }
+        `;
+        
+        // Convert variant IDs to GraphQL format
+        const gqlVariantIds = batch.map(id => `gid://shopify/ProductVariant/${id}`);
+        
+        // Make single GraphQL request for entire batch
+        const graphqlUrl = `https://${storeNameClean}.myshopify.com/admin/api/2024-01/graphql.json`;
+        const response = await fetch(graphqlUrl, {
+          method: 'POST',
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            query: graphqlQuery,
+            variables: { ids: gqlVariantIds }
+          })
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`❌ GraphQL request failed (${response.status}):`, errorText);
+          errorCount += batch.length;
           
-          if (variantResponse.ok) {
-            const variantData = await variantResponse.json();
-            inventoryItemIds.push({
-              variantId: variantId,
-              inventoryItemId: variantData.variant.inventory_item_id
-            });
+          // If rate limited, wait 5 seconds
+          if (response.status === 429) {
+            console.log('⏸️ Rate limit hit, waiting 5 seconds...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+          }
+          continue;
+        }
+        
+        const result = await response.json();
+        
+        // Check for GraphQL errors
+        if (result.errors) {
+          console.error('❌ GraphQL errors:', result.errors);
+          errorCount += batch.length;
+          continue;
+        }
+        
+        // Update database for all variants in batch
+        const nodes = result.data?.nodes || [];
+        
+        for (let j = 0; j < nodes.length; j++) {
+          const node = nodes[j];
+          if (!node) {
+            console.warn(`⚠️ Null node at index ${j} in batch ${batchNumber}`);
+            continue;
           }
           
-          await new Promise(resolve => setTimeout(resolve, 100)); // Rate limiting
-        } catch (error) {
-          console.error(`❌ Error fetching variant ${variantId}:`, error.message);
-        }
-      }
-      
-      // Now fetch inventory levels for these inventory items
-      for (const item of inventoryItemIds) {
-        try {
-          const inventoryUrl = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/inventory_levels.json?inventory_item_ids=${item.inventoryItemId}`;
-          const inventoryResponse = await fetch(inventoryUrl, {
-            headers: {
-              'X-Shopify-Access-Token': accessToken,
-              'Content-Type': 'application/json'
-            }
-          });
+          const variantId = batch[j];
+          const inventoryQuantity = node.inventoryQuantity || 0;
           
-          if (inventoryResponse.ok) {
-            const inventoryData = await inventoryResponse.json();
-            const totalQuantity = inventoryData.inventory_levels.reduce((sum, level) => {
-              return sum + (level.available || 0);
-            }, 0);
-            
+          try {
             // Update database
             await pool.query(
               'UPDATE products SET inventory_quantity = $1, updated_at = NOW() WHERE variant_id = $2',
-              [totalQuantity, item.variantId]
+              [inventoryQuantity, variantId]
             );
-            
             updatedCount++;
+          } catch (dbError) {
+            console.error(`❌ Database error for variant ${variantId}:`, dbError.message);
+            errorCount++;
           }
-          
-          await new Promise(resolve => setTimeout(resolve, 100)); // Rate limiting
-        } catch (error) {
-          console.error(`❌ Error fetching inventory for variant ${item.variantId}:`, error.message);
+        }
+        
+        console.log(`✅ Batch ${batchNumber}/${totalBatches} complete (${updatedCount} total updated)`);
+        
+        // Rate limiting: wait 500ms between batches (Shopify allows 2 req/sec)
+        if (i + batchSize < variantIds.length) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
+      } catch (error) {
+        console.error(`❌ Error processing batch ${batchNumber}:`, error.message);
+        errorCount += batch.length;
+        
+        // Handle rate limits with exponential backoff
+        if (error.message.includes('429') || error.message.includes('rate limit')) {
+          console.log('⏸️ Rate limit detected, waiting 5 seconds...');
+          await new Promise(resolve => setTimeout(resolve, 5000));
         }
       }
-      
-      console.log(`📦 Progress: ${Math.min(i + batchSize, variantIds.length)}/${variantIds.length} variants processed`);
     }
     
-    console.log(`✅ Inventory update complete! ${updatedCount} variants updated`);
-    return { success: true, updated: updatedCount };
+    console.log(`✅ Inventory update complete!`);
+    console.log(`   ✅ Successfully updated: ${updatedCount} variants`);
+    console.log(`   ❌ Errors: ${errorCount} variants`);
+    console.log(`   📊 Success rate: ${((updatedCount / variantIds.length) * 100).toFixed(1)}%`);
+    
+    return { 
+      success: true, 
+      updated: updatedCount,
+      errors: errorCount,
+      total: variantIds.length
+    };
     
   } catch (error) {
     console.error('❌ Inventory update failed:', error);
