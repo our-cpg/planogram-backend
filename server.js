@@ -1693,6 +1693,127 @@ app.post('/api/shopify/update-prices', async (req, res) => {
   }
 });
 
+// ============================================
+// INVENTORY SYNC ENDPOINTS
+// ============================================
+
+// Manual inventory sync endpoint with auth
+app.post('/api/sync-inventory', async (req, res) => {
+  try {
+    const { storeName, accessToken } = req.body;
+    
+    if (!storeName || !accessToken) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing storeName or accessToken' 
+      });
+    }
+    
+    console.log('🔄 Manual inventory sync triggered');
+    const result = await updateInventoryLevels(storeName, accessToken);
+    
+    res.json({
+      success: true,
+      message: 'Inventory sync completed',
+      ...result
+    });
+  } catch (error) {
+    console.error('❌ Manual sync failed:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Quick sync endpoint (uses env vars for convenience)
+app.post('/api/sync-inventory-quick', async (req, res) => {
+  try {
+    const storeName = process.env.SHOPIFY_STORE_NAME || 'a1beautysupply.myshopify.com';
+    const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+    
+    if (!accessToken) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'No access token configured in environment variables' 
+      });
+    }
+    
+    console.log('🔄 Quick inventory sync triggered');
+    const result = await updateInventoryLevels(storeName, accessToken);
+    
+    res.json({
+      success: true,
+      message: 'Inventory sync completed',
+      ...result
+    });
+  } catch (error) {
+    console.error('❌ Quick sync failed:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Get last sync status
+app.get('/api/sync-status', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        COUNT(*) as total_products,
+        MAX(updated_at) as last_inventory_update,
+        COUNT(CASE WHEN inventory_quantity > 0 THEN 1 END) as in_stock,
+        COUNT(CASE WHEN inventory_quantity = 0 THEN 1 END) as out_of_stock
+      FROM products
+    `);
+    
+    res.json({
+      success: true,
+      ...result.rows[0]
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ============================================
+// AUTO-SYNC INVENTORY
+// ============================================
+
+const AUTO_SYNC_INTERVAL = 60 * 60 * 1000; // 1 hour
+
+async function autoSyncInventory() {
+  const storeName = process.env.SHOPIFY_STORE_NAME || 'a1beautysupply.myshopify.com';
+  const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+  
+  if (!accessToken) {
+    console.log('⚠️ No access token configured for auto-sync');
+    return;
+  }
+  
+  try {
+    console.log('⏰ Running scheduled inventory sync...');
+    const result = await updateInventoryLevels(storeName, accessToken);
+    console.log(`✅ Scheduled sync complete: ${result.updated}/${result.total} updated`);
+  } catch (error) {
+    console.error('❌ Scheduled sync failed:', error.message);
+  }
+}
+
+// Run initial sync 30 seconds after server starts
+setTimeout(() => {
+  console.log('🚀 Running initial inventory sync...');
+  autoSyncInventory();
+}, 30000);
+
+// Then run every hour
+setInterval(autoSyncInventory, AUTO_SYNC_INTERVAL);
+console.log(`⏰ Auto-sync enabled: will run every ${AUTO_SYNC_INTERVAL / 1000 / 60} minutes`);
+
 pool.query('SELECT NOW()', (err, res) => {
   if (err) {
     console.error('❌ Database connection failed:', err);
