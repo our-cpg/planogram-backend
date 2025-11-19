@@ -1823,4 +1823,24 @@ pool.query('SELECT NOW()', (err, res) => {
   }
 });
 
+// Auto-sync inventory every 5 minutes
+const FIVE_MINUTES = 5 * 60 * 1000;
+
+setInterval(async () => {
+  const storeName = process.env.SHOPIFY_STORE_NAME || '1m3tfh-xt.myshopify.com';
+  const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+  
+  if (accessToken) {
+    console.log('⏰ Running automatic 5-minute inventory sync...');
+    try {
+      await updateInventoryLevels(storeName, accessToken);
+      console.log('✅ Auto-sync complete');
+    } catch (error) {
+      console.error('❌ Auto-sync failed:', error.message);
+    }
+  }
+}, FIVE_MINUTES);
+
+console.log('⏰ Automatic inventory sync enabled: every 5 minutes');
+
 startServer();
