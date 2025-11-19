@@ -290,7 +290,7 @@ async function importProducts(storeName, accessToken) {
               parseFloat(variant.price) || 0,
               variant.compare_at_price ? parseFloat(variant.compare_at_price) : null,
               variant.inventory_management ? parseFloat(variant.price) * 0.6 : null,
-              variant.inventory_quantity || 0,
+              variant.inventory_quantity !== null && variant.inventory_quantity !== undefined ? variant.inventory_quantity : 0,
               product.vendor || null,
               null, // distributor - will be fetched on-demand
               Array.isArray(product.tags) ? product.tags.join(', ') : (product.tags || null),
@@ -484,7 +484,10 @@ async function updateInventoryLevels(storeName, accessToken) {
           }
           
           const variantId = batch[j];
-          const inventoryQuantity = node.inventoryQuantity || 0;
+          // Handle negative inventory properly - don't use || 0 which treats negatives as falsy
+          const inventoryQuantity = node.inventoryQuantity !== null && node.inventoryQuantity !== undefined 
+            ? node.inventoryQuantity 
+            : 0;
           
           try {
             // Update database
