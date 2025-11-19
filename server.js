@@ -965,14 +965,20 @@ app.post('/api/shopify', async (req, res) => {
     } else if (action === 'refreshInventory') {
       console.log('📦 INVENTORY REFRESH REQUESTED...');
       
-      const result = await updateInventoryLevels(storeName, accessToken);
+      // Run in background to avoid timeout
+      updateInventoryLevels(storeName, accessToken)
+        .then(result => {
+          console.log(`✅ Inventory update complete: ${result.updated} variants`);
+        })
+        .catch(error => {
+          console.error('❌ Inventory update failed:', error);
+        });
       
-      console.log(`✅ Inventory levels updated: ${result.updated} variants`);
-      
+      // Return immediately
       res.json({ 
         success: true, 
-        message: `Inventory updated! ${result.updated} products refreshed`,
-        updatedCount: result.updated
+        message: 'Inventory refresh started in background. This will take 15-20 minutes for 934 products.',
+        processing: true
       });
 
    } else if (action === 'refreshOrders') {
