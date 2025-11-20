@@ -2626,8 +2626,10 @@ app.get('/api/sales/date-range', async (req, res) => {
     // Fetch orders from Shopify within date range
     while (hasNextPage && pageCount < 50) {
       const url = pageInfo 
-        ? `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${startDate}&created_at_max=${endDate}&page_info=${pageInfo}`
-        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${startDate}&created_at_max=${endDate}`;
+        ? `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${encodeURIComponent(startDate)}&created_at_max=${encodeURIComponent(endDate)}&page_info=${pageInfo}`
+        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${encodeURIComponent(startDate)}&created_at_max=${encodeURIComponent(endDate)}`;
+      
+      console.log(`[SALES DATE RANGE] 🔗 Fetching: ${url.substring(0, 100)}...`);
       
       const response = await fetch(url, {
         headers: {
@@ -2636,7 +2638,9 @@ app.get('/api/sales/date-range', async (req, res) => {
       });
       
       if (!response.ok) {
-        throw new Error(`Shopify API error: ${response.status}`);
+        const errorText = await response.text();
+        console.error(`[SALES DATE RANGE] ❌ Shopify API error ${response.status}:`, errorText);
+        throw new Error(`Shopify API error: ${response.status} - ${errorText}`);
       }
       
       const data = await response.json();
