@@ -2596,6 +2596,125 @@ app.get('/api/sync-status', async (req, res) => {
   }
 });
 
+// Get sales data for a specific date range
+app.get('/api/sales/date-range', async (req, res) => {
+  const { storeName, accessToken, startDate, endDate } = req.query;
+
+  if (!storeName || !accessToken) {
+    return res.status(400).json({ error: 'Store name and access token required' });
+  }
+
+  if (!startDate || !endDate) {
+    return res.status(400).json({ error: 'Start date and end date required' });
+  }
+
+  console.log(`[SALES DATE RANGE] 📊 Fetching sales from ${startDate} to ${endDate}`);
+
+  try {
+    const storeNameClean = storeName.replace('.myshopify.com', '');
+    
+    // Calculate the number of days in the period
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const daysInPeriod = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
+    
+    let allOrders = [];
+    let hasNextPage = true;
+    let pageInfo = null;
+    let pageCount = 0;
+    
+    // Fetch orders from Shopify within date range
+    while (hasNextPage && pageCount < 50) {
+      const url = pageInfo 
+        ? `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${startDate}&created_at_max=${endDate}&page_info=${pageInfo}`
+        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${startDate}&created_at_max=${endDate}`;
+      
+      const response = await fetch(url, {
+        headers: {
+          'X-Shopify-Access-Token': accessToken
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Shopify API error: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      const orders = data.orders || [];
+      
+      allOrders = allOrders.concat(orders);
+      pageCount++;
+      
+      // Check for pagination
+      const linkHeader = response.headers.get('link');
+      if (linkHeader && linkHeader.includes('rel="next"')) {
+        const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
+        if (nextMatch) {
+          pageInfo = nextMatch[1];
+        } else {
+          hasNextPage = false;
+        }
+      } else {
+        hasNextPage = false;
+      }
+      
+      console.log(`[SALES DATE RANGE] 📦 Fetched page ${pageCount}: ${orders.length} orders`);
+    }
+    
+    console.log(`[SALES DATE RANGE] ✅ Total orders fetched: ${allOrders.length}`);
+    
+    // Aggregate sales by variant
+    const salesByVariant = {};
+    
+    allOrders.forEach(order => {
+      if (order.cancelled_at) return;
+      
+      order.line_items.forEach(item => {
+        const variantId = item.variant_id;
+        const quantity = item.quantity;
+        
+        if (!salesByVariant[variantId]) {
+          salesByVariant[variantId] = {
+            variantId: variantId,
+            productId: item.product_id,
+            totalSales: 0,
+            orderCount: 0
+          };
+        }
+        
+        salesByVariant[variantId].totalSales += quantity;
+        salesByVariant[variantId].orderCount += 1;
+      });
+    });
+    
+    // Convert to array
+    const salesData = Object.values(salesByVariant).map(variant => ({
+      ...variant,
+      daysInPeriod,
+      dailyVelocity: variant.totalSales / daysInPeriod
+    }));
+    
+    console.log(`[SALES DATE RANGE] ✅ Aggregated sales for ${salesData.length} variants`);
+    
+    res.json({
+      success: true,
+      startDate,
+      endDate,
+      daysInPeriod,
+      totalOrders: allOrders.length,
+      variantsWithSales: salesData.length,
+      salesData: salesData
+    });
+    
+  } catch (error) {
+    console.error('[SALES DATE RANGE] ❌ Error:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch date-range sales',
+      message: error.message 
+    });
+  }
+});
+
 // ============================================
 // AUTO-SYNC INVENTORY
 // ============================================
