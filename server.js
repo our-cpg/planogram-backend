@@ -1622,6 +1622,45 @@ app.get('/api/shopify/live-products-all', async (req, res) => {
   }
 });
 
+// Direct database update for distributor normalization (bypass Shopify sync)
+app.post('/api/update-database-distributors', async (req, res) => {
+  try {
+    const { searchTerm, correctValue } = req.body;
+    
+    if (!searchTerm || !correctValue) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing searchTerm or correctValue' 
+      });
+    }
+    
+    console.log(`🔧 Updating database: distributors containing "${searchTerm}" → "${correctValue}"`);
+    
+    // Update all products in database where distributor contains the search term
+    const result = await pool.query(`
+      UPDATE products 
+      SET distributor = $1 
+      WHERE distributor ILIKE $2 
+      AND distributor != $1
+    `, [correctValue, `%${searchTerm}%`]);
+    
+    console.log(`✅ Updated ${result.rowCount} rows in database`);
+    
+    res.json({
+      success: true,
+      message: 'Database distributors updated',
+      updated: result.rowCount
+    });
+    
+  } catch (error) {
+    console.error('❌ Database update failed:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
 // Normalize distributor variations (e.g., fix "Jinny", "Jinny ", "jinny Beauty Supply" → "Jinny Beauty Supply")
 app.post('/api/normalize-distributor', async (req, res) => {
   try {
