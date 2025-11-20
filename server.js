@@ -1643,7 +1643,7 @@ async function syncMetafields(storeName, accessToken) {
     let skippedCount = 0;
     
     // Process in batches to avoid overwhelming the API
-    const batchSize = 10; // Small batches for metafields (each requires a separate API call)
+    const batchSize = 5; // Smaller batches to avoid rate limits
     
     for (let i = 0; i < products.length; i += batchSize) {
       const batch = products.slice(i, i + batchSize);
@@ -1652,52 +1652,76 @@ async function syncMetafields(storeName, accessToken) {
       
       console.log(`⏳ Processing metafield batch ${batchNumber}/${totalBatches}...`);
       
-      // Process batch in parallel
-      await Promise.all(batch.map(async (product) => {
-        try {
-          const metafieldsUrl = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products/${product.product_id}/metafields.json`;
-          
-          const response = await fetch(metafieldsUrl, {
-            headers: {
-              'X-Shopify-Access-Token': accessToken,
-              'Content-Type': 'application/json'
+      // Process batch sequentially (not in parallel) to avoid rate limits
+      for (const product of batch) {
+        let retryCount = 0;
+        const maxRetries = 3;
+        
+        while (retryCount <= maxRetries) {
+          try {
+            const metafieldsUrl = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products/${product.product_id}/metafields.json`;
+            
+            const response = await fetch(metafieldsUrl, {
+              headers: {
+                'X-Shopify-Access-Token': accessToken,
+                'Content-Type': 'application/json'
+              }
+            });
+            
+            if (response.status === 429) {
+              // Rate limited - wait and retry
+              const waitTime = 2000 * Math.pow(2, retryCount); // Exponential backoff
+              console.log(`⏸️ Rate limit hit, waiting ${waitTime / 1000}s...`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+              retryCount++;
+              continue;
             }
-          });
-          
-          if (!response.ok) {
-            if (response.status === 404) {
-              // Product deleted from Shopify
-              skippedCount++;
-              return;
+            
+            if (!response.ok) {
+              if (response.status === 404) {
+                // Product deleted from Shopify
+                skippedCount++;
+                break;
+              }
+              throw new Error(`API error: ${response.status}`);
             }
-            throw new Error(`API error: ${response.status}`);
-          }
-          
-          const metafieldsData = await response.json();
-          const distributorMetafield = metafieldsData.metafields?.find(
-            mf => mf.namespace === 'custom' && mf.key === 'vendor'
-          );
-          
-          if (distributorMetafield?.value) {
-            // Update all variants of this product with the distributor
-            await pool.query(
-              'UPDATE products SET distributor = $1 WHERE product_id = $2',
-              [distributorMetafield.value, product.product_id]
+            
+            const metafieldsData = await response.json();
+            const distributorMetafield = metafieldsData.metafields?.find(
+              mf => mf.namespace === 'custom' && mf.key === 'vendor'
             );
-            successCount++;
-          } else {
-            skippedCount++;
+            
+            if (distributorMetafield?.value) {
+              // Update all variants of this product with the distributor
+              await pool.query(
+                'UPDATE products SET distributor = $1 WHERE product_id = $2',
+                [distributorMetafield.value, product.product_id]
+              );
+              successCount++;
+            } else {
+              skippedCount++;
+            }
+            
+            // Success - break retry loop
+            break;
+            
+          } catch (error) {
+            if (retryCount >= maxRetries) {
+              console.error(`❌ Error fetching metafields for product ${product.product_id}:`, error.message);
+              errorCount++;
+              break;
+            }
+            retryCount++;
           }
-          
-        } catch (error) {
-          console.error(`❌ Error fetching metafields for product ${product.product_id}:`, error.message);
-          errorCount++;
         }
-      }));
+        
+        // Small delay between each product to avoid rate limits
+        await new Promise(resolve => setTimeout(resolve, 300)); // 300ms per product
+      }
       
-      // Rate limiting between batches
+      // Longer delay between batches
       if (i + batchSize < products.length) {
-        await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second between batches
+        await new Promise(resolve => setTimeout(resolve, 2000)); // 2 seconds between batches
       }
     }
     
