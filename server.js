@@ -1547,28 +1547,37 @@ app.get('/api/shopify/live-products-all', async (req, res) => {
         let distributor = null;
         
         try {
-          const dbResult = await pool.query(`
+          // Get sales data and distributor separately for reliability
+          let salesQuery = await pool.query(`
             SELECT 
-              COALESCE(s.daily_sales, 0) as daily_sales,
-              COALESCE(s.weekly_sales, 0) as weekly_sales,
-              COALESCE(s.monthly_sales, 0) as monthly_sales,
-              COALESCE(s.all_time_sales, 0) as all_time_sales,
-              p.distributor
-            FROM sales_data s
-            FULL OUTER JOIN products p ON s.variant_id = p.variant_id
-            WHERE p.variant_id = $1 OR p.product_id = $2
-            LIMIT 1
-          `, [variantId, productId]);
+              COALESCE(daily_sales, 0) as daily_sales,
+              COALESCE(weekly_sales, 0) as weekly_sales,
+              COALESCE(monthly_sales, 0) as monthly_sales,
+              COALESCE(all_time_sales, 0) as all_time_sales
+            FROM sales_data
+            WHERE variant_id = $1
+          `, [variantId]);
           
-          if (dbResult.rows.length > 0) {
-            const row = dbResult.rows[0];
+          if (salesQuery.rows.length > 0) {
+            const row = salesQuery.rows[0];
             salesData = {
               dailySales: parseInt(row.daily_sales) || 0,
               weeklySales: parseInt(row.weekly_sales) || 0,
               monthlySales: parseInt(row.monthly_sales) || 0,
               allTimeSales: parseInt(row.all_time_sales) || 0
             };
-            distributor = row.distributor;
+          }
+          
+          // Get distributor from products table
+          let distQuery = await pool.query(`
+            SELECT distributor
+            FROM products
+            WHERE variant_id = $1 OR product_id = $2
+            LIMIT 1
+          `, [variantId, productId]);
+          
+          if (distQuery.rows.length > 0) {
+            distributor = distQuery.rows[0].distributor;
           }
         } catch (dbError) {
           // Continue without sales data/distributor if DB lookup fails
