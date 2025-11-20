@@ -278,6 +278,7 @@ async function importProducts(storeName, accessToken) {
                 cost = EXCLUDED.cost,
                 inventory_quantity = EXCLUDED.inventory_quantity,
                 vendor = EXCLUDED.vendor,
+                distributor = EXCLUDED.distributor,
                 tags = EXCLUDED.tags,
                 updated_at = EXCLUDED.updated_at
             `, [
