@@ -1699,6 +1699,11 @@ async function syncMetafields(storeName, accessToken) {
               );
               successCount++;
             } else {
+              // No metafield found - set distributor to NULL to clean up old data
+              await pool.query(
+                'UPDATE products SET distributor = NULL WHERE product_id = $1',
+                [product.product_id]
+              );
               skippedCount++;
             }
             
