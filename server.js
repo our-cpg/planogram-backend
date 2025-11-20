@@ -340,7 +340,7 @@ async function importProducts(storeName, accessToken) {
 
 // NEW: Fetch actual inventory levels from Shopify InventoryLevel API with improved rate limiting
 async function updateInventoryLevels(storeName, accessToken) {
-  console.log('📦 Updating inventory levels from Shopify...');
+  console.log('[INVENTORY SYNC] 📦 Updating inventory levels from Shopify...');
   
   try {
     const storeNameClean = storeName.replace('.myshopify.com', '');
@@ -368,7 +368,7 @@ async function updateInventoryLevels(storeName, accessToken) {
       const baseDelay = 2000; // Start with 2 seconds
       
       try {
-        console.log(`⏳ Processing batch ${batchNumber}/${totalBatches} (${batch.length} variants)${retryCount > 0 ? ` [Retry ${retryCount}]` : ''}`);
+        console.log(`[INVENTORY SYNC] ⏳ Processing batch ${batchNumber}/${totalBatches} (${batch.length} variants)${retryCount > 0 ? ` [Retry ${retryCount}]` : ''}`);
         
         // GraphQL query to get inventory for all variants in batch at once
         const graphqlQuery = `
@@ -1060,14 +1060,14 @@ app.post('/api/shopify', async (req, res) => {
       });
 
     } else if (action === 'refreshProducts') {
-      console.log('📦 PRODUCTS REFRESH REQUESTED...');
+      console.log('[PRODUCT CACHE REFRESH] 📦 PRODUCTS REFRESH REQUESTED...');
       
       await importProducts(storeName, accessToken);
       
       const countResult = await pool.query('SELECT COUNT(*) as count FROM products');
       const productCount = parseInt(countResult.rows[0].count);
       
-      console.log(`✅ Products imported: ${productCount}`);
+      console.log(`[PRODUCT CACHE REFRESH] ✅ Products imported: ${productCount}`);
       
       res.json({ 
         success: true, 
@@ -1465,7 +1465,7 @@ app.get('/api/shopify/live-products-all', async (req, res) => {
     return res.status(400).json({ error: 'Missing Shopify credentials' });
   }
   
-  console.log('🔴 FETCHING ALL PRODUCTS WITH LIVE INVENTORY FROM SHOPIFY');
+  console.log('[FORECASTING] 🔴 FETCHING ALL PRODUCTS WITH LIVE INVENTORY FROM SHOPIFY');
   
   try {
     const storeNameClean = storeName.replace('.myshopify.com', '');
@@ -1866,7 +1866,7 @@ app.post('/api/normalize-distributor', async (req, res) => {
 // ============================================
 
 async function syncMetafields(storeName, accessToken) {
-  console.log('🔧 Starting metafield sync for all products...');
+  console.log('[METAFIELD SYNC] 🔧 Starting metafield sync for all products...');
   
   try {
     const storeNameClean = storeName.replace('.myshopify.com', '');
