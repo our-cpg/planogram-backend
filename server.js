@@ -1535,14 +1535,16 @@ app.get('/api/shopify/live-products-all', async (req, res) => {
         const variant = edge.node;
         const product = variant.product;
         
-        // Get sales data from database if available
+        // Get sales data AND distributor from database if available
         const variantId = variant.id.split('/').pop();
+        const productId = product.id.split('/').pop();
         let salesData = {
           dailySales: 0,
           weeklySales: 0,
           monthlySales: 0,
           allTimeSales: 0
         };
+        let distributor = null;
         
         try {
           const dbResult = await pool.query(`
@@ -1550,10 +1552,13 @@ app.get('/api/shopify/live-products-all', async (req, res) => {
               COALESCE(s.daily_sales, 0) as daily_sales,
               COALESCE(s.weekly_sales, 0) as weekly_sales,
               COALESCE(s.monthly_sales, 0) as monthly_sales,
-              COALESCE(s.all_time_sales, 0) as all_time_sales
+              COALESCE(s.all_time_sales, 0) as all_time_sales,
+              p.distributor
             FROM sales_data s
-            WHERE s.variant_id = $1
-          `, [variantId]);
+            FULL OUTER JOIN products p ON s.variant_id = p.variant_id
+            WHERE p.variant_id = $1 OR p.product_id = $2
+            LIMIT 1
+          `, [variantId, productId]);
           
           if (dbResult.rows.length > 0) {
             const row = dbResult.rows[0];
@@ -1563,9 +1568,10 @@ app.get('/api/shopify/live-products-all', async (req, res) => {
               monthlySales: parseInt(row.monthly_sales) || 0,
               allTimeSales: parseInt(row.all_time_sales) || 0
             };
+            distributor = row.distributor;
           }
         } catch (dbError) {
-          // Continue without sales data if DB lookup fails
+          // Continue without sales data/distributor if DB lookup fails
         }
         
         allProducts.push({
@@ -1577,6 +1583,7 @@ app.get('/api/shopify/live-products-all', async (req, res) => {
           price: parseFloat(variant.price) || 0,
           stock: variant.inventoryQuantity, // LIVE from Shopify!
           vendor: product.vendor,
+          distributor: distributor, // From database (synced daily)
           tags: Array.isArray(product.tags) ? product.tags.join(', ') : product.tags,
           ...salesData,
           source: 'shopify_live'
@@ -1614,6 +1621,165 @@ app.get('/api/shopify/live-products-all', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ============================================
+// METAFIELD SYNC - Background job to update distributor data
+// ============================================
+
+async function syncMetafields(storeName, accessToken) {
+  console.log('🔧 Starting metafield sync for all products...');
+  
+  try {
+    const storeNameClean = storeName.replace('.myshopify.com', '');
+    
+    // Get all products from database
+    const productsResult = await pool.query('SELECT DISTINCT product_id, title FROM products WHERE product_id IS NOT NULL');
+    const products = productsResult.rows;
+    
+    console.log(`📦 Found ${products.length} unique products to sync metafields`);
+    
+    let successCount = 0;
+    let errorCount = 0;
+    let skippedCount = 0;
+    
+    // Process in batches to avoid overwhelming the API
+    const batchSize = 10; // Small batches for metafields (each requires a separate API call)
+    
+    for (let i = 0; i < products.length; i += batchSize) {
+      const batch = products.slice(i, i + batchSize);
+      const batchNumber = Math.floor(i / batchSize) + 1;
+      const totalBatches = Math.ceil(products.length / batchSize);
+      
+      console.log(`⏳ Processing metafield batch ${batchNumber}/${totalBatches}...`);
+      
+      // Process batch in parallel
+      await Promise.all(batch.map(async (product) => {
+        try {
+          const metafieldsUrl = `https://${storeNameClean}.myshopify.com/admin/api/2025-10/products/${product.product_id}/metafields.json`;
+          
+          const response = await fetch(metafieldsUrl, {
+            headers: {
+              'X-Shopify-Access-Token': accessToken,
+              'Content-Type': 'application/json'
+            }
+          });
+          
+          if (!response.ok) {
+            if (response.status === 404) {
+              // Product deleted from Shopify
+              skippedCount++;
+              return;
+            }
+            throw new Error(`API error: ${response.status}`);
+          }
+          
+          const metafieldsData = await response.json();
+          const distributorMetafield = metafieldsData.metafields?.find(
+            mf => mf.namespace === 'custom' && mf.key === 'vendor'
+          );
+          
+          if (distributorMetafield?.value) {
+            // Update all variants of this product with the distributor
+            await pool.query(
+              'UPDATE products SET distributor = $1 WHERE product_id = $2',
+              [distributorMetafield.value, product.product_id]
+            );
+            successCount++;
+          } else {
+            skippedCount++;
+          }
+          
+        } catch (error) {
+          console.error(`❌ Error fetching metafields for product ${product.product_id}:`, error.message);
+          errorCount++;
+        }
+      }));
+      
+      // Rate limiting between batches
+      if (i + batchSize < products.length) {
+        await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second between batches
+      }
+    }
+    
+    console.log(`✅ Metafield sync complete!`);
+    console.log(`   ✅ Updated: ${successCount} products`);
+    console.log(`   ⏭️  Skipped: ${skippedCount} products (no metafield or deleted)`);
+    console.log(`   ❌ Errors: ${errorCount} products`);
+    
+    return {
+      success: true,
+      updated: successCount,
+      skipped: skippedCount,
+      errors: errorCount,
+      total: products.length
+    };
+    
+  } catch (error) {
+    console.error('❌ Metafield sync failed:', error);
+    throw error;
+  }
+}
+
+// Manual metafield sync endpoint
+app.post('/api/sync-metafields', async (req, res) => {
+  try {
+    const storeName = req.body.storeName || process.env.SHOPIFY_STORE_NAME;
+    const accessToken = req.body.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
+    
+    if (!storeName || !accessToken) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing storeName or accessToken' 
+      });
+    }
+    
+    console.log('🔧 Manual metafield sync triggered');
+    const result = await syncMetafields(storeName, accessToken);
+    
+    res.json({
+      success: true,
+      message: 'Metafield sync completed',
+      ...result
+    });
+  } catch (error) {
+    console.error('❌ Metafield sync failed:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Auto-sync metafields daily
+const METAFIELD_SYNC_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
+
+async function autoSyncMetafields() {
+  const storeName = process.env.SHOPIFY_STORE_NAME || '1m3tfh-xt.myshopify.com';
+  const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+  
+  if (!accessToken) {
+    console.log('⚠️ No access token configured for metafield auto-sync');
+    return;
+  }
+  
+  try {
+    console.log('⏰ Running scheduled metafield sync...');
+    const result = await syncMetafields(storeName, accessToken);
+    console.log(`✅ Scheduled metafield sync complete: ${result.updated}/${result.total} updated`);
+  } catch (error) {
+    console.error('❌ Scheduled metafield sync failed:', error.message);
+  }
+}
+
+// Run initial metafield sync 2 minutes after server starts (let inventory sync finish first)
+setTimeout(() => {
+  console.log('🚀 Running initial metafield sync...');
+  autoSyncMetafields();
+}, 2 * 60 * 1000);
+
+// Then run every 24 hours
+setInterval(autoSyncMetafields, METAFIELD_SYNC_INTERVAL);
+console.log(`🔧 Metafield auto-sync enabled: will run every 24 hours`);
 
 // Get all products with forecasting data
 app.get('/api/products/all', async (req, res) => {
