@@ -1622,6 +1622,197 @@ app.get('/api/shopify/live-products-all', async (req, res) => {
   }
 });
 
+// Normalize distributor variations (e.g., fix "Jinny", "Jinny ", "jinny Beauty Supply" → "Jinny Beauty Supply")
+app.post('/api/normalize-distributor', async (req, res) => {
+  try {
+    const { storeName, accessToken, searchTerm, correctValue } = req.body;
+    
+    if (!storeName || !accessToken || !searchTerm || !correctValue) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required parameters: storeName, accessToken, searchTerm, correctValue' 
+      });
+    }
+    
+    console.log(`🔧 Normalizing distributor: "${searchTerm}" → "${correctValue}"`);
+    
+    const storeNameClean = storeName.replace('.myshopify.com', '');
+    
+    let allProductsToUpdate = [];
+    let hasNextPage = true;
+    let cursor = null;
+    let pageCount = 0;
+    
+    // Step 1: Fetch all products with the metafield
+    while (hasNextPage) {
+      pageCount++;
+      console.log(`📦 Fetching page ${pageCount}...`);
+      
+      const query = `
+        query getProducts($cursor: String) {
+          products(first: 250, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            edges {
+              node {
+                id
+                title
+                vendor: metafield(namespace: "custom", key: "vendor") {
+                  id
+                  value
+                }
+              }
+            }
+          }
+        }
+      `;
+      
+      const response = await fetch(`https://${storeNameClean}.myshopify.com/admin/api/2024-01/graphql.json`, {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': accessToken,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          query: query,
+          variables: cursor ? { cursor } : {}
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Shopify API error: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      const edges = result.data?.products?.edges || [];
+      
+      // Find products with variations of the search term
+      for (const edge of edges) {
+        const product = edge.node;
+        const vendorValue = product.vendor?.value;
+        
+        if (vendorValue && 
+            vendorValue.toLowerCase().includes(searchTerm.toLowerCase()) && 
+            vendorValue !== correctValue) {
+          allProductsToUpdate.push({
+            productId: product.id,
+            metafieldId: product.vendor.id,
+            currentValue: vendorValue,
+            title: product.title
+          });
+        }
+      }
+      
+      const pageInfo = result.data?.products?.pageInfo;
+      hasNextPage = pageInfo?.hasNextPage || false;
+      cursor = pageInfo?.endCursor;
+      
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    console.log(`✅ Found ${allProductsToUpdate.length} products to normalize`);
+    const uniqueVariations = [...new Set(allProductsToUpdate.map(p => p.currentValue))];
+    console.log(`📊 Unique variations found: ${uniqueVariations.join(', ')}`);
+    
+    if (allProductsToUpdate.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No products found to update',
+        updated: 0,
+        variations: []
+      });
+    }
+    
+    // Step 2: Update each metafield
+    console.log(`🔄 Updating ${allProductsToUpdate.length} metafields...`);
+    
+    let successCount = 0;
+    let errorCount = 0;
+    
+    for (let i = 0; i < allProductsToUpdate.length; i++) {
+      const product = allProductsToUpdate[i];
+      
+      if (i % 10 === 0) {
+        console.log(`   Progress: ${i}/${allProductsToUpdate.length}...`);
+      }
+      
+      try {
+        const mutation = `
+          mutation updateMetafield($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) {
+              metafields {
+                id
+                value
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `;
+        
+        const response = await fetch(`https://${storeNameClean}.myshopify.com/admin/api/2024-01/graphql.json`, {
+          method: 'POST',
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            query: mutation,
+            variables: {
+              metafields: [{
+                ownerId: product.productId,
+                namespace: 'custom',
+                key: 'vendor',
+                value: correctValue,
+                type: 'single_line_text_field'
+              }]
+            }
+          })
+        });
+        
+        if (!response.ok) {
+          throw new Error(`API error: ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        if (result.data?.metafieldsSet?.userErrors?.length > 0) {
+          throw new Error(result.data.metafieldsSet.userErrors[0].message);
+        }
+        
+        successCount++;
+        await new Promise(resolve => setTimeout(resolve, 250));
+        
+      } catch (error) {
+        console.error(`❌ Error updating product:`, error.message);
+        errorCount++;
+      }
+    }
+    
+    console.log(`✅ Normalization complete! Updated: ${successCount}, Errors: ${errorCount}`);
+    
+    res.json({
+      success: true,
+      message: 'Distributor normalization complete',
+      updated: successCount,
+      errors: errorCount,
+      total: allProductsToUpdate.length,
+      variations: uniqueVariations
+    });
+    
+  } catch (error) {
+    console.error('❌ Normalize distributor failed:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
 // ============================================
 // METAFIELD SYNC - Background job to update distributor data
 // ============================================
