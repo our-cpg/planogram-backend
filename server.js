@@ -1069,10 +1069,14 @@ app.post('/api/shopify', async (req, res) => {
       const productCount = parseInt(countResult.rows[0].count);
       
       console.log(`[PRODUCT CACHE REFRESH] ✅ Products imported: ${productCount}`);
+      console.log('[PRODUCT CACHE REFRESH] 🔧 Now syncing metafields...');
+      
+      // Automatically sync metafields after importing products
+      await syncMetafields(storeName, accessToken);
       
       res.json({ 
         success: true, 
-        message: `${productCount} products imported`,
+        message: `${productCount} products imported with metafields`,
         productCount
       });
 
