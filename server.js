@@ -371,7 +371,7 @@ async function updateInventoryLevels(storeName, accessToken) {
       try {
         console.log(`[INVENTORY SYNC] ⏳ Processing batch ${batchNumber}/${totalBatches} (${batch.length} variants)${retryCount > 0 ? ` [Retry ${retryCount}]` : ''}`);
         
-        // GraphQL query to get inventory for all variants in batch at once
+        // GraphQL query to get inventory AND distributor metafield for all variants in batch at once
         const graphqlQuery = `
           query getInventoryLevels($ids: [ID!]!) {
             nodes(ids: $ids) {
@@ -381,6 +381,12 @@ async function updateInventoryLevels(storeName, accessToken) {
                 inventoryItem {
                   id
                   tracked
+                }
+                product {
+                  id
+                  metafield(namespace: "custom", key: "vendor") {
+                    value
+                  }
                 }
               }
             }
@@ -490,11 +496,14 @@ async function updateInventoryLevels(storeName, accessToken) {
             ? node.inventoryQuantity 
             : 0;
           
+          // Get distributor from metafield
+          const distributor = node.product?.metafield?.value || null;
+          
           try {
-            // Update database
+            // Update database with both inventory AND distributor
             await pool.query(
-              'UPDATE products SET inventory_quantity = $1, updated_at = NOW() WHERE variant_id = $2',
-              [inventoryQuantity, variantId]
+              'UPDATE products SET inventory_quantity = $1, distributor = $2, updated_at = NOW() WHERE variant_id = $3',
+              [inventoryQuantity, distributor, variantId]
             );
             updatedInBatch++;
           } catch (dbError) {
