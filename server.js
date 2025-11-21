@@ -2725,6 +2725,33 @@ app.get('/api/sales/date-range', async (req, res) => {
   }
 });
 
+// Clear all distributors (force refresh)
+app.post('/api/clear-distributors', async (req, res) => {
+  try {
+    console.log('[CLEAR DISTRIBUTORS] 🧹 Clearing all distributor values...');
+    
+    const result = await pool.query(`
+      UPDATE products 
+      SET distributor = NULL, updated_at = NOW()
+    `);
+    
+    console.log(`[CLEAR DISTRIBUTORS] ✅ Cleared ${result.rowCount} distributor values`);
+    
+    res.json({
+      success: true,
+      message: 'All distributors cleared. Next inventory sync will repopulate.',
+      cleared: result.rowCount
+    });
+    
+  } catch (error) {
+    console.error('[CLEAR DISTRIBUTORS] ❌ Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // ============================================
 // AUTO-SYNC INVENTORY
 // ============================================
