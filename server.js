@@ -190,6 +190,17 @@ async function initDatabase() {
     `);
     console.log('✅ Product_correlations table ready');
 
+    // Create settings table for tracking refresh timestamps
+    console.log('⚙️ Creating settings table...');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ Settings table ready');
+
     // Create indexes for better query performance
     console.log('📑 Creating indexes...');
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_customer ON orders(customer_id);`);
@@ -586,12 +597,12 @@ async function importSalesData(storeName, accessToken) {
     let pageInfo = null;
     let pageCount = 0;
 
-    console.log('📥 Fetching orders from last year...');
+    console.log('📥 Fetching ALL orders (this may take a while for stores with many orders)...');
 
     while (hasNextPage) {
       const url = pageInfo 
         ? `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&page_info=${pageInfo}`
-        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any&created_at_min=${oneYearAgo.toISOString()}`;
+        : `https://${storeNameClean}.myshopify.com/admin/api/2025-10/orders.json?limit=250&status=any`;
 
       const response = await fetch(url, {
         headers: {
@@ -632,7 +643,7 @@ async function importSalesData(storeName, accessToken) {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
 
-    console.log(`✅ Fetched ${allOrders.length} total orders from last year`);
+    console.log(`✅ Fetched ${allOrders.length} total orders (all time)`);
 
     // Calculate sales for each time period
     const salesByVariant = {};
@@ -1089,7 +1100,42 @@ app.post('/api/shopify', async (req, res) => {
     } else if (action === 'refreshSales') {
       console.log('📊 SALES REFRESH REQUESTED...');
       
+      // Check when last refresh happened
+      const lastRefreshResult = await pool.query(
+        "SELECT value, updated_at FROM settings WHERE key = 'last_sales_refresh'"
+      );
+      
+      if (lastRefreshResult.rows.length > 0) {
+        const lastRefresh = new Date(lastRefreshResult.rows[0].updated_at);
+        const hoursSinceRefresh = (Date.now() - lastRefresh.getTime()) / (1000 * 60 * 60);
+        
+        if (hoursSinceRefresh < 24) {
+          const hoursRemaining = Math.ceil(24 - hoursSinceRefresh);
+          console.log(`⏰ Sales data was refreshed ${hoursSinceRefresh.toFixed(1)} hours ago. Next refresh in ${hoursRemaining} hours.`);
+          
+          const salesResult = await pool.query('SELECT COUNT(*) as count FROM sales_data WHERE monthly_sales > 0');
+          const salesCount = parseInt(salesResult.rows[0].count);
+          
+          return res.json({ 
+            success: true, 
+            message: `Sales data is fresh (updated ${hoursSinceRefresh.toFixed(1)} hours ago). Next refresh in ${hoursRemaining} hours.`,
+            salesCount,
+            lastRefresh: lastRefresh.toISOString(),
+            nextRefresh: new Date(lastRefresh.getTime() + 24 * 60 * 60 * 1000).toISOString()
+          });
+        }
+      }
+      
+      // Proceed with refresh
       await importSalesData(storeName, accessToken);
+      
+      // Update last refresh timestamp
+      await pool.query(`
+        INSERT INTO settings (key, value, updated_at) 
+        VALUES ('last_sales_refresh', 'completed', NOW())
+        ON CONFLICT (key) 
+        DO UPDATE SET value = 'completed', updated_at = NOW()
+      `);
       
       const salesResult = await pool.query('SELECT COUNT(*) as count FROM sales_data WHERE monthly_sales > 0');
       const salesCount = parseInt(salesResult.rows[0].count);
@@ -1099,7 +1145,8 @@ app.post('/api/shopify', async (req, res) => {
       res.json({ 
         success: true, 
         message: `Sales updated! ${salesCount} products with sales data`,
-        salesCount
+        salesCount,
+        refreshedAt: new Date().toISOString()
       });
 
     } else if (action === 'refreshInventory') {
