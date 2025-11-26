@@ -562,7 +562,7 @@ async function importSalesData(storeName, accessToken) {
   }
 }
 
-// 🔥 BEAST MODE: Import full order data for customer analytics - FULLY FIXED
+// 🔥 BEAST MODE: Import full order data - REDUCED TO 1 MONTH TO PREVENT CRASHES
 async function importOrderData(storeName, accessToken) {
   console.log('🛒🔥 BEAST MODE: Starting order data import...');
   
@@ -571,12 +571,13 @@ async function importOrderData(storeName, accessToken) {
     let hasNextPage = true;
     let pageInfo = null;
     let pageCount = 0;
-    const MAX_PAGES = 100; // Increased limit for more orders
+    const MAX_PAGES = 20; // Reduced for safety on free tier
 
-    // Fetch orders from Shopify - get last 6 months only
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-    console.log(`📅 Fetching orders from last 6 months (since ${sixMonthsAgo.toISOString().split('T')[0]})...`);
+    // 🔥 CHANGED FROM 6 MONTHS TO 1 MONTH TO PREVENT CRASHES
+    const oneMonthAgo = new Date();
+    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+    console.log(`📅 Fetching orders from last month (since ${oneMonthAgo.toISOString().split('T')[0]})...`);
+    console.log(`⚠️ Limited to 1 month to prevent memory issues on free tier`);
 
     while (hasNextPage && pageCount < MAX_PAGES) {
       let url;
@@ -584,8 +585,8 @@ async function importOrderData(storeName, accessToken) {
         // When paginating, ONLY use page_info and limit
         url = `https://${storeName}/admin/api/2024-10/orders.json?page_info=${pageInfo}&limit=250`;
       } else {
-        // First request: get orders from last 6 months
-        url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&status=any&created_at_min=${sixMonthsAgo.toISOString()}`;
+        // First request: get orders from last month only
+        url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&status=any&created_at_min=${oneMonthAgo.toISOString()}`;
       }
 
       const response = await fetch(url, {
@@ -607,34 +608,30 @@ async function importOrderData(storeName, accessToken) {
       console.log(`📦 Fetched page ${pageCount}: ${data.orders?.length || 0} orders (Total so far: ${allOrders.length})`);
 
       const linkHeader = response.headers.get('Link');
-      console.log(`🔗 Link header:`, linkHeader);
       
       if (linkHeader && linkHeader.includes('rel="next"')) {
         const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)>;\s*rel="next"/);
         if (nextMatch) {
           pageInfo = nextMatch[1];
-          console.log(`➡️ Found next page with pageInfo: ${pageInfo.substring(0, 20)}...`);
         } else {
-          console.log(`⚠️ Has 'next' in link header but couldn't parse page_info`);
           hasNextPage = false;
         }
       } else {
-        console.log(`✅ No more pages - this was the last page`);
         hasNextPage = false;
       }
     }
 
-    console.log(`🎯 Fetched ${allOrders.length} total orders`);
+    console.log(`🎯 Fetched ${allOrders.length} total orders from last month`);
 
     // Handle stores with no orders
     if (allOrders.length === 0) {
-      console.log('ℹ️ No orders found in store');
+      console.log('ℹ️ No orders found in the last month');
       return {
         success: true,
         ordersProcessed: 0,
         itemsProcessed: 0,
         ordersWithoutCustomers: 0,
-        message: 'No orders found. Add some orders to your Shopify store to enable BEAST MODE analytics!',
+        message: 'No orders found in the last month.',
         analytics: null
       };
     }
@@ -689,7 +686,6 @@ async function importOrderData(storeName, accessToken) {
         for (const item of order.line_items) {
           // Skip items without variant_id (gift cards, shipping, etc.)
           if (!item.variant_id || !item.product_id) {
-            console.log(`⚠️ Skipping line item without variant_id in order ${order.id}`);
             continue;
           }
 
@@ -713,18 +709,18 @@ async function importOrderData(storeName, accessToken) {
             ]);
             itemsProcessed++;
           } catch (itemErr) {
-            console.log(`⚠️ Skipping problematic item in order ${order.id}:`, itemErr.message);
+            // Silently skip problematic items to avoid spam
           }
         }
 
         ordersProcessed++;
         
-        // Progress log every 100 orders
-        if (ordersProcessed % 100 === 0) {
+        // Progress log every 50 orders (more frequent for smaller batch)
+        if (ordersProcessed % 50 === 0) {
           console.log(`⏳ Progress: ${ordersProcessed}/${allOrders.length} orders processed...`);
         }
       } catch (orderErr) {
-        console.error(`❌ Error processing order ${order.id}:`, orderErr);
+        console.error(`❌ Error processing order ${order.id}:`, orderErr.message);
       }
     }
 
@@ -752,7 +748,7 @@ async function importOrderData(storeName, accessToken) {
         last_order_date = EXCLUDED.last_order_date
     `);
 
-    // Calculate product correlations
+    // Calculate product correlations (simplified for performance)
     console.log('🤝 Calculating product correlations...');
     await pool.query(`
       INSERT INTO product_correlations (product_a_id, product_b_id, co_purchase_count, correlation_score)
@@ -786,7 +782,7 @@ async function importOrderData(storeName, accessToken) {
         COALESCE(AVG(total_price), 0) as avg_order_value
       FROM orders
       WHERE order_date >= $1
-    `, [sixMonthsAgo]);
+    `, [oneMonthAgo]);
 
     const analytics = analyticsResult.rows[0];
 
@@ -795,7 +791,7 @@ async function importOrderData(storeName, accessToken) {
       ordersProcessed,
       itemsProcessed,
       ordersWithoutCustomers,
-      message: `Beast mode engaged! ${ordersProcessed} orders analyzed (${ordersWithoutCustomers} guest orders).`,
+      message: `Beast mode complete! ${ordersProcessed} orders from last month analyzed.`,
       analytics: {
         totalOrders: parseInt(analytics.total_orders) || 0,
         uniqueCustomers: parseInt(analytics.unique_customers) || 0,
@@ -1292,11 +1288,12 @@ app.get('/api/correlations', async (req, res) => {
 // Start server
 async function startServer() {
   console.log('🚀 Starting Planogram Backend v2.0 (Sales Tracking + BEAST MODE)...');
+  console.log('⚠️ BEAST MODE limited to 1 MONTH of orders to prevent memory issues');
   await initDatabase();
   app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`📊 Sales tracking: ENABLED`);
-    console.log(`🔥 BEAST MODE: READY`);
+    console.log(`🔥 BEAST MODE: READY (1 month limit)`);
     console.log(`🔥 ALL DATABASE FIXES: APPLIED`);
     console.log(`🔗 Test at: http://localhost:${PORT}`);
   });
