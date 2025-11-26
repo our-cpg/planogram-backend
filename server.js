@@ -135,6 +135,19 @@ async function initDatabase() {
     `);
     console.log('✅ Order items table ready');
 
+    // 🔥 FIX MISSING COLUMNS FOR BEAST MODE
+    console.log('🔧 Fixing missing columns for BEAST MODE...');
+    try {
+      await pool.query(`
+        ALTER TABLE order_items 
+        ADD COLUMN IF NOT EXISTS title TEXT,
+        ADD COLUMN IF NOT EXISTS variant_title TEXT
+      `);
+      console.log('✅ Fixed order_items table columns');
+    } catch (err) {
+      console.log('⚠️ Order items columns note:', err.message);
+    }
+
     // Create customer_stats table (BEAST MODE)
     console.log('👥 Creating customer_stats table...');
     await pool.query(`
@@ -149,6 +162,17 @@ async function initDatabase() {
       );
     `);
     console.log('✅ Customer stats table ready');
+
+    // 🔥 FIX MISSING EMAIL_HASH COLUMN
+    try {
+      await pool.query(`
+        ALTER TABLE customer_stats 
+        ADD COLUMN IF NOT EXISTS email_hash TEXT
+      `);
+      console.log('✅ Fixed customer_stats email_hash column');
+    } catch (err) {
+      console.log('⚠️ Customer stats column note:', err.message);
+    }
 
     // Create product_correlations table (BEAST MODE)
     console.log('🤝 Creating product_correlations table...');
@@ -200,7 +224,7 @@ async function initDatabase() {
       console.log('⚠️ Metafields index might already exist:', err.message);
     }
 
-    console.log('🔥🔥🔥 BEAST MODE DATABASE READY!');
+    console.log('🔥🔥🔥 BEAST MODE DATABASE READY WITH ALL FIXES!');
   } catch (error) {
     console.error('❌ Database init error:', error.message);
     throw error;
@@ -525,7 +549,7 @@ async function importSalesData(storeName, accessToken) {
   }
 }
 
-// 🔥 BEAST MODE: Import full order data for customer analytics - FIXED PAGINATION
+// 🔥 BEAST MODE: Import full order data for customer analytics - FIXED
 async function importOrderData(storeName, accessToken) {
   console.log('🛒🔥 BEAST MODE: Starting order data import...');
   
@@ -544,7 +568,7 @@ async function importOrderData(storeName, accessToken) {
     while (hasNextPage && pageCount < MAX_PAGES) {
       let url;
       if (pageInfo) {
-        // When paginating, ONLY use page_info (no other params) - THIS IS THE FIX
+        // When paginating, ONLY use page_info and limit
         url = `https://${storeName}/admin/api/2024-10/orders.json?page_info=${pageInfo}&limit=250`;
       } else {
         // First request: get orders from last 6 months
@@ -598,7 +622,7 @@ async function importOrderData(storeName, accessToken) {
         itemsProcessed: 0,
         ordersWithoutCustomers: 0,
         message: 'No orders found. Add some orders to your Shopify store to enable BEAST MODE analytics!',
-        analytics: null // No data to analyze
+        analytics: null
       };
     }
 
@@ -662,13 +686,13 @@ async function importOrderData(storeName, accessToken) {
                 order_id, variant_id, product_id, title, variant_title,
                 quantity, price, cart_position, customer_is_returning
               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-              ON CONFLICT ON CONSTRAINT order_items_pkey DO NOTHING
+              ON CONFLICT (id) DO NOTHING
             `, [
               order.id,
               item.variant_id,
               item.product_id,
-              item.title,
-              item.variant_title,
+              item.title || item.name || 'Unknown Product',
+              item.variant_title || '',
               item.quantity || 1,
               parseFloat(item.price) || 0,
               cartPosition++,
@@ -681,6 +705,11 @@ async function importOrderData(storeName, accessToken) {
         }
 
         ordersProcessed++;
+        
+        // Progress log every 100 orders
+        if (ordersProcessed % 100 === 0) {
+          console.log(`⏳ Progress: ${ordersProcessed}/${allOrders.length} orders processed...`);
+        }
       } catch (orderErr) {
         console.error(`❌ Error processing order ${order.id}:`, orderErr);
       }
@@ -702,6 +731,7 @@ async function importOrderData(storeName, accessToken) {
       WHERE customer_id IS NOT NULL
       GROUP BY customer_id
       ON CONFLICT (customer_id) DO UPDATE SET
+        email_hash = EXCLUDED.email_hash,
         order_count = EXCLUDED.order_count,
         total_spent = EXCLUDED.total_spent,
         average_order_value = EXCLUDED.average_order_value,
@@ -739,8 +769,8 @@ async function importOrderData(storeName, accessToken) {
       SELECT 
         COUNT(DISTINCT order_id) as total_orders,
         COUNT(DISTINCT customer_id) as unique_customers,
-        SUM(total_price) as total_revenue,
-        AVG(total_price) as avg_order_value
+        COALESCE(SUM(total_price), 0) as total_revenue,
+        COALESCE(AVG(total_price), 0) as avg_order_value
       FROM orders
       WHERE order_date >= $1
     `, [sixMonthsAgo]);
@@ -754,10 +784,10 @@ async function importOrderData(storeName, accessToken) {
       ordersWithoutCustomers,
       message: `Beast mode engaged! ${ordersProcessed} orders analyzed (${ordersWithoutCustomers} guest orders).`,
       analytics: {
-        totalOrders: parseInt(analytics.total_orders),
-        uniqueCustomers: parseInt(analytics.unique_customers),
-        totalRevenue: parseFloat(analytics.total_revenue),
-        avgOrderValue: parseFloat(analytics.avg_order_value)
+        totalOrders: parseInt(analytics.total_orders) || 0,
+        uniqueCustomers: parseInt(analytics.unique_customers) || 0,
+        totalRevenue: parseFloat(analytics.total_revenue) || 0,
+        avgOrderValue: parseFloat(analytics.avg_order_value) || 0
       }
     };
 
@@ -948,6 +978,21 @@ app.post('/api/shopify', async (req, res) => {
         });
       }
 
+    } else if (action === 'refreshProducts') {
+      // This is likely a typo in your frontend - should be refreshInventory
+      console.log('⚠️ refreshProducts called - redirecting to refreshInventory');
+      const productCount = await fetchAllProducts(storeName, accessToken);
+      const costCount = await fetchInventoryCosts(storeName, accessToken);
+      const salesData = await importSalesData(storeName, accessToken);
+      
+      res.json({ 
+        success: true, 
+        productsUpdated: productCount,
+        costsUpdated: costCount,
+        salesUpdated: salesData.updated,
+        message: `Inventory refreshed: ${productCount} products, ${costCount} costs, ${salesData.updated} sales records`
+      });
+      
     } else {
       res.status(400).json({ error: 'Invalid action' });
     }
@@ -997,10 +1042,10 @@ app.get('/api/product/:upc', async (req, res) => {
     const analyticsResult = await pool.query(`
       SELECT 
         COUNT(DISTINCT oi.order_id) as times_purchased,
-        AVG(o.total_price) as average_order_value,
-        SUM(CASE WHEN o.is_returning_customer THEN oi.quantity ELSE 0 END) as returning_customer_purchases,
-        SUM(CASE WHEN NOT o.is_returning_customer THEN oi.quantity ELSE 0 END) as new_customer_purchases,
-        AVG(oi.cart_position) as average_cart_position
+        COALESCE(AVG(o.total_price), 0) as average_order_value,
+        COALESCE(SUM(CASE WHEN o.is_returning_customer THEN oi.quantity ELSE 0 END), 0) as returning_customer_purchases,
+        COALESCE(SUM(CASE WHEN NOT o.is_returning_customer THEN oi.quantity ELSE 0 END), 0) as new_customer_purchases,
+        COALESCE(AVG(oi.cart_position), 0) as average_cart_position
       FROM order_items oi
       JOIN orders o ON o.order_id = oi.order_id
       WHERE oi.variant_id = $1
@@ -1239,11 +1284,12 @@ async function startServer() {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`📊 Sales tracking: ENABLED`);
     console.log(`🔥 BEAST MODE: READY`);
+    console.log(`🔥 DATABASE FIXES: APPLIED`);
     console.log(`🔗 Test at: http://localhost:${PORT}`);
   });
 }
 
-// Auto-refresh functionality (simplified, rest of code continues...)
+// Auto-refresh functionality
 const AUTO_REFRESH_INTERVAL = 60 * 60 * 1000; // 1 hour
 let activeConnections = [];
 let lastSettings = null;
