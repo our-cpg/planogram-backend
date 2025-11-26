@@ -135,17 +135,30 @@ async function initDatabase() {
     `);
     console.log('✅ Order items table ready');
 
-    // 🔥 FIX MISSING COLUMNS FOR BEAST MODE
+    // 🔥 FIX ALL MISSING COLUMNS FOR BEAST MODE
     console.log('🔧 Fixing missing columns for BEAST MODE...');
+    
+    // Fix missing title and variant_title columns
     try {
       await pool.query(`
         ALTER TABLE order_items 
         ADD COLUMN IF NOT EXISTS title TEXT,
         ADD COLUMN IF NOT EXISTS variant_title TEXT
       `);
-      console.log('✅ Fixed order_items table columns');
+      console.log('✅ Fixed order_items title columns');
     } catch (err) {
       console.log('⚠️ Order items columns note:', err.message);
+    }
+
+    // Fix missing customer_is_returning column
+    try {
+      await pool.query(`
+        ALTER TABLE order_items 
+        ADD COLUMN IF NOT EXISTS customer_is_returning BOOLEAN DEFAULT FALSE
+      `);
+      console.log('✅ Fixed order_items customer_is_returning column');
+    } catch (err) {
+      console.log('⚠️ Customer returning column note:', err.message);
     }
 
     // Create customer_stats table (BEAST MODE)
@@ -549,7 +562,7 @@ async function importSalesData(storeName, accessToken) {
   }
 }
 
-// 🔥 BEAST MODE: Import full order data for customer analytics - FIXED
+// 🔥 BEAST MODE: Import full order data for customer analytics - FULLY FIXED
 async function importOrderData(storeName, accessToken) {
   console.log('🛒🔥 BEAST MODE: Starting order data import...');
   
@@ -1284,7 +1297,7 @@ async function startServer() {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`📊 Sales tracking: ENABLED`);
     console.log(`🔥 BEAST MODE: READY`);
-    console.log(`🔥 DATABASE FIXES: APPLIED`);
+    console.log(`🔥 ALL DATABASE FIXES: APPLIED`);
     console.log(`🔗 Test at: http://localhost:${PORT}`);
   });
 }
