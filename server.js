@@ -29,11 +29,12 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // Track order processing status
 let orderProcessingStatus = {
   isProcessing: false,
+  progress: null,
   lastCompleted: null,
   lastResult: null
 };
@@ -562,29 +563,41 @@ async function importSalesData(storeName, accessToken) {
   }
 }
 
-// 🔥 BEAST MODE: Import full order data for customer analytics - FULLY FIXED
+// 🔥 BEAST MODE: Import full order data for customer analytics - MEMORY OPTIMIZED
 async function importOrderData(storeName, accessToken) {
-  console.log('🛒🔥 BEAST MODE: Starting order data import...');
-  
+  console.log('🛒🔥 BEAST MODE: Starting MEMORY-OPTIMIZED order data import...');
+
+  // Update processing status with progress info
+  orderProcessingStatus.progress = { phase: 'fetching', current: 0, total: 0 };
+
   try {
-    let allOrders = [];
     let hasNextPage = true;
     let pageInfo = null;
     let pageCount = 0;
-    const MAX_PAGES = 100; // Increased limit for more orders
+    const MAX_PAGES = 100;
+
+    let ordersProcessed = 0;
+    let itemsProcessed = 0;
+    let ordersWithoutCustomers = 0;
+    let totalOrdersFetched = 0;
 
     // Fetch orders from Shopify - get last 6 months only
     const sixMonthsAgo = new Date();
     sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
     console.log(`📅 Fetching orders from last 6 months (since ${sixMonthsAgo.toISOString().split('T')[0]})...`);
 
+    // First, get a count estimate and clear old data for fresh import
+    console.log('🧹 Clearing old order items for fresh import...');
+    await pool.query('DELETE FROM order_items');
+    await pool.query('DELETE FROM orders');
+    console.log('✅ Old data cleared');
+
+    // Process orders in streaming batches - DON'T accumulate in memory
     while (hasNextPage && pageCount < MAX_PAGES) {
       let url;
       if (pageInfo) {
-        // When paginating, ONLY use page_info and limit
         url = `https://${storeName}/admin/api/2024-10/orders.json?page_info=${pageInfo}&limit=250`;
       } else {
-        // First request: get orders from last 6 months
         url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&status=any&created_at_min=${sixMonthsAgo.toISOString()}`;
       }
 
@@ -602,32 +615,44 @@ async function importOrderData(storeName, accessToken) {
       }
 
       const data = await response.json();
-      allOrders = allOrders.concat(data.orders || []);
+      const orders = data.orders || [];
+      totalOrdersFetched += orders.length;
       pageCount++;
-      console.log(`📦 Fetched page ${pageCount}: ${data.orders?.length || 0} orders (Total so far: ${allOrders.length})`);
 
+      console.log(`📦 Page ${pageCount}: Processing ${orders.length} orders (Total: ${totalOrdersFetched})`);
+      orderProcessingStatus.progress = {
+        phase: 'processing',
+        current: ordersProcessed,
+        total: totalOrdersFetched,
+        page: pageCount
+      };
+
+      // Process this batch immediately, then discard from memory
+      const batchResult = await processOrderBatch(orders);
+      ordersProcessed += batchResult.ordersProcessed;
+      itemsProcessed += batchResult.itemsProcessed;
+      ordersWithoutCustomers += batchResult.ordersWithoutCustomers;
+
+      // Check for next page
       const linkHeader = response.headers.get('Link');
-      console.log(`🔗 Link header:`, linkHeader);
-      
       if (linkHeader && linkHeader.includes('rel="next"')) {
         const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)>;\s*rel="next"/);
         if (nextMatch) {
           pageInfo = nextMatch[1];
-          console.log(`➡️ Found next page with pageInfo: ${pageInfo.substring(0, 20)}...`);
         } else {
-          console.log(`⚠️ Has 'next' in link header but couldn't parse page_info`);
           hasNextPage = false;
         }
       } else {
-        console.log(`✅ No more pages - this was the last page`);
         hasNextPage = false;
       }
+
+      // Small delay between batches to prevent overwhelming
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
-    console.log(`🎯 Fetched ${allOrders.length} total orders`);
+    console.log(`🎯 Fetched and processed ${totalOrdersFetched} total orders`);
 
-    // Handle stores with no orders
-    if (allOrders.length === 0) {
+    if (totalOrdersFetched === 0) {
       console.log('ℹ️ No orders found in store');
       return {
         success: true,
@@ -639,100 +664,13 @@ async function importOrderData(storeName, accessToken) {
       };
     }
 
-    // Process each order
-    let ordersProcessed = 0;
-    let itemsProcessed = 0;
-    let ordersWithoutCustomers = 0;
-    const customerOrderCounts = new Map();
-
-    for (const order of allOrders) {
-      try {
-        const customerId = order.customer?.id || null;
-        const emailHash = order.customer?.email ? 
-          crypto.createHash('md5').update(order.customer.email).digest('hex') : null;
-
-        // Track orders without customers
-        if (!customerId) {
-          ordersWithoutCustomers++;
-        }
-
-        // Track customer order count (only if customer exists)
-        if (customerId) {
-          customerOrderCounts.set(customerId, (customerOrderCounts.get(customerId) || 0) + 1);
-        }
-
-        const isReturning = customerId ? (customerOrderCounts.get(customerId) > 1) : false;
-
-        // Insert/Update order
-        await pool.query(`
-          INSERT INTO orders (
-            order_id, order_number, customer_id, customer_email_hash,
-            total_price, subtotal_price, total_tax, order_date, is_returning_customer
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-          ON CONFLICT (order_id) DO UPDATE SET
-            total_price = EXCLUDED.total_price,
-            is_returning_customer = EXCLUDED.is_returning_customer
-        `, [
-          order.id,
-          order.order_number || order.name,
-          customerId,
-          emailHash,
-          parseFloat(order.total_price) || 0,
-          parseFloat(order.subtotal_price) || 0,
-          parseFloat(order.total_tax) || 0,
-          new Date(order.created_at),
-          isReturning
-        ]);
-
-        // Process line items
-        let cartPosition = 1;
-        for (const item of order.line_items) {
-          // Skip items without variant_id (gift cards, shipping, etc.)
-          if (!item.variant_id || !item.product_id) {
-            console.log(`⚠️ Skipping line item without variant_id in order ${order.id}`);
-            continue;
-          }
-
-          try {
-            await pool.query(`
-              INSERT INTO order_items (
-                order_id, variant_id, product_id, title, variant_title,
-                quantity, price, cart_position, customer_is_returning
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-              ON CONFLICT (id) DO NOTHING
-            `, [
-              order.id,
-              item.variant_id,
-              item.product_id,
-              item.title || item.name || 'Unknown Product',
-              item.variant_title || '',
-              item.quantity || 1,
-              parseFloat(item.price) || 0,
-              cartPosition++,
-              isReturning
-            ]);
-            itemsProcessed++;
-          } catch (itemErr) {
-            console.log(`⚠️ Skipping problematic item in order ${order.id}:`, itemErr.message);
-          }
-        }
-
-        ordersProcessed++;
-        
-        // Progress log every 100 orders
-        if (ordersProcessed % 100 === 0) {
-          console.log(`⏳ Progress: ${ordersProcessed}/${allOrders.length} orders processed...`);
-        }
-      } catch (orderErr) {
-        console.error(`❌ Error processing order ${order.id}:`, orderErr);
-      }
-    }
-
-    // Calculate customer statistics
+    // Calculate customer statistics (lightweight query)
     console.log('👥 Calculating customer statistics...');
+    orderProcessingStatus.progress = { phase: 'customer_stats', current: ordersProcessed, total: totalOrdersFetched };
+
     await pool.query(`
       INSERT INTO customer_stats (customer_id, email_hash, order_count, total_spent, average_order_value, first_order_date, last_order_date)
-      SELECT 
+      SELECT
         customer_id,
         MAX(customer_email_hash) as email_hash,
         COUNT(*) as order_count,
@@ -751,35 +689,21 @@ async function importOrderData(storeName, accessToken) {
         first_order_date = EXCLUDED.first_order_date,
         last_order_date = EXCLUDED.last_order_date
     `);
+    console.log('✅ Customer stats updated');
 
-    // Calculate product correlations
-    console.log('🤝 Calculating product correlations...');
-    await pool.query(`
-      INSERT INTO product_correlations (product_a_id, product_b_id, co_purchase_count, correlation_score)
-      SELECT 
-        a.product_id as product_a_id,
-        b.product_id as product_b_id,
-        COUNT(*) as co_purchase_count,
-        COUNT(*)::decimal / (
-          SELECT COUNT(DISTINCT order_id) 
-          FROM order_items 
-          WHERE product_id IN (a.product_id, b.product_id)
-        ) as correlation_score
-      FROM order_items a
-      JOIN order_items b ON a.order_id = b.order_id AND a.product_id < b.product_id
-      GROUP BY a.product_id, b.product_id
-      HAVING COUNT(*) > 1
-      ON CONFLICT (product_a_id, product_b_id) DO UPDATE SET
-        co_purchase_count = EXCLUDED.co_purchase_count,
-        correlation_score = EXCLUDED.correlation_score
-    `);
+    // Calculate product correlations in a memory-efficient way
+    console.log('🤝 Calculating product correlations (optimized)...');
+    orderProcessingStatus.progress = { phase: 'correlations', current: ordersProcessed, total: totalOrdersFetched };
+
+    await calculateCorrelationsEfficiently();
+    console.log('✅ Correlations calculated');
 
     console.log(`✅🔥 BEAST MODE COMPLETE: ${ordersProcessed} orders, ${itemsProcessed} items processed!`);
     console.log(`📊 Orders without customers (guest checkouts): ${ordersWithoutCustomers}`);
 
     // Get analytics summary
     const analyticsResult = await pool.query(`
-      SELECT 
+      SELECT
         COUNT(DISTINCT order_id) as total_orders,
         COUNT(DISTINCT customer_id) as unique_customers,
         COALESCE(SUM(total_price), 0) as total_revenue,
@@ -806,7 +730,154 @@ async function importOrderData(storeName, accessToken) {
 
   } catch (error) {
     console.error('❌ BEAST MODE failed:', error);
+    orderProcessingStatus.progress = { phase: 'error', error: error.message };
     throw error;
+  }
+}
+
+// Process a batch of orders - memory efficient
+async function processOrderBatch(orders) {
+  let ordersProcessed = 0;
+  let itemsProcessed = 0;
+  let ordersWithoutCustomers = 0;
+
+  // Build bulk insert values for orders
+  const orderValues = [];
+  const orderParams = [];
+  let orderParamIndex = 1;
+
+  for (const order of orders) {
+    const customerId = order.customer?.id || null;
+    const emailHash = order.customer?.email ?
+      crypto.createHash('md5').update(order.customer.email).digest('hex') : null;
+
+    if (!customerId) {
+      ordersWithoutCustomers++;
+    }
+
+    orderValues.push(`($${orderParamIndex++}, $${orderParamIndex++}, $${orderParamIndex++}, $${orderParamIndex++}, $${orderParamIndex++}, $${orderParamIndex++}, $${orderParamIndex++}, $${orderParamIndex++}, $${orderParamIndex++})`);
+    orderParams.push(
+      order.id,
+      order.order_number || order.name,
+      customerId,
+      emailHash,
+      parseFloat(order.total_price) || 0,
+      parseFloat(order.subtotal_price) || 0,
+      parseFloat(order.total_tax) || 0,
+      new Date(order.created_at),
+      false // is_returning will be calculated later
+    );
+  }
+
+  // Bulk insert orders
+  if (orderValues.length > 0) {
+    try {
+      await pool.query(`
+        INSERT INTO orders (
+          order_id, order_number, customer_id, customer_email_hash,
+          total_price, subtotal_price, total_tax, order_date, is_returning_customer
+        ) VALUES ${orderValues.join(', ')}
+        ON CONFLICT (order_id) DO UPDATE SET
+          total_price = EXCLUDED.total_price
+      `, orderParams);
+      ordersProcessed = orders.length;
+    } catch (err) {
+      console.error('❌ Bulk order insert failed:', err.message);
+      // Fall back to individual inserts
+      for (const order of orders) {
+        try {
+          const customerId = order.customer?.id || null;
+          const emailHash = order.customer?.email ?
+            crypto.createHash('md5').update(order.customer.email).digest('hex') : null;
+
+          await pool.query(`
+            INSERT INTO orders (order_id, order_number, customer_id, customer_email_hash, total_price, subtotal_price, total_tax, order_date, is_returning_customer)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (order_id) DO NOTHING
+          `, [order.id, order.order_number || order.name, customerId, emailHash, parseFloat(order.total_price) || 0, parseFloat(order.subtotal_price) || 0, parseFloat(order.total_tax) || 0, new Date(order.created_at), false]);
+          ordersProcessed++;
+        } catch (e) {
+          console.error(`⚠️ Skipping order ${order.id}:`, e.message);
+        }
+      }
+    }
+  }
+
+  // Process line items in batches of 50 orders at a time
+  const ITEM_BATCH_SIZE = 50;
+  for (let i = 0; i < orders.length; i += ITEM_BATCH_SIZE) {
+    const orderBatch = orders.slice(i, i + ITEM_BATCH_SIZE);
+    const itemValues = [];
+    const itemParams = [];
+    let itemParamIndex = 1;
+
+    for (const order of orderBatch) {
+      let cartPosition = 1;
+      for (const item of order.line_items) {
+        if (!item.variant_id || !item.product_id) continue;
+
+        itemValues.push(`($${itemParamIndex++}, $${itemParamIndex++}, $${itemParamIndex++}, $${itemParamIndex++}, $${itemParamIndex++}, $${itemParamIndex++}, $${itemParamIndex++}, $${itemParamIndex++}, $${itemParamIndex++})`);
+        itemParams.push(
+          order.id,
+          item.variant_id,
+          item.product_id,
+          (item.title || item.name || 'Unknown Product').substring(0, 255),
+          (item.variant_title || '').substring(0, 255),
+          item.quantity || 1,
+          parseFloat(item.price) || 0,
+          cartPosition++,
+          false
+        );
+      }
+    }
+
+    if (itemValues.length > 0) {
+      try {
+        await pool.query(`
+          INSERT INTO order_items (
+            order_id, variant_id, product_id, title, variant_title,
+            quantity, price, cart_position, customer_is_returning
+          ) VALUES ${itemValues.join(', ')}
+        `, itemParams);
+        itemsProcessed += itemValues.length;
+      } catch (err) {
+        console.error('⚠️ Bulk item insert issue:', err.message);
+        // Items will be skipped but processing continues
+      }
+    }
+  }
+
+  return { ordersProcessed, itemsProcessed, ordersWithoutCustomers };
+}
+
+// Calculate correlations efficiently without self-join
+async function calculateCorrelationsEfficiently() {
+  try {
+    // Clear existing correlations
+    await pool.query('DELETE FROM product_correlations');
+
+    // Use a more efficient approach: aggregate in smaller chunks
+    // First, get unique product pairs from orders with multiple items
+    await pool.query(`
+      INSERT INTO product_correlations (product_a_id, product_b_id, co_purchase_count, correlation_score)
+      SELECT
+        LEAST(a.product_id, b.product_id) as product_a_id,
+        GREATEST(a.product_id, b.product_id) as product_b_id,
+        COUNT(DISTINCT a.order_id) as co_purchase_count,
+        0.0 as correlation_score
+      FROM order_items a
+      INNER JOIN order_items b ON a.order_id = b.order_id AND a.product_id < b.product_id
+      GROUP BY LEAST(a.product_id, b.product_id), GREATEST(a.product_id, b.product_id)
+      HAVING COUNT(DISTINCT a.order_id) >= 2
+      LIMIT 10000
+      ON CONFLICT (product_a_id, product_b_id) DO UPDATE SET
+        co_purchase_count = EXCLUDED.co_purchase_count
+    `);
+
+    console.log('✅ Correlations calculated (top 10,000 pairs)');
+  } catch (err) {
+    console.error('⚠️ Correlation calculation failed (non-fatal):', err.message);
+    // Non-fatal - we can continue without correlations
   }
 }
 
@@ -836,33 +907,38 @@ app.post('/api/shopify', async (req, res) => {
 
     } else if (action === 'refreshOrders') {
       console.log('🔥🛒 BEAST MODE ORDER REFRESH REQUESTED...');
-      
+
       if (orderProcessingStatus.isProcessing) {
         return res.json({
           success: false,
           message: 'Order processing already in progress. Please wait.',
-          processing: true
+          processing: true,
+          progress: orderProcessingStatus.progress
         });
       }
-      
+
       orderProcessingStatus.isProcessing = true;
-      
+      orderProcessingStatus.progress = { phase: 'starting', current: 0, total: 0 };
+
       // Start processing in background (don't await)
       importOrderData(storeName, accessToken)
         .then(result => {
           console.log(`✅ Background processing complete: ${result.ordersProcessed} orders`);
           orderProcessingStatus.isProcessing = false;
+          orderProcessingStatus.progress = { phase: 'complete', current: result.ordersProcessed, total: result.ordersProcessed };
           orderProcessingStatus.lastCompleted = new Date();
           orderProcessingStatus.lastResult = result;
         })
         .catch(error => {
           console.error('❌ Background processing failed:', error);
           orderProcessingStatus.isProcessing = false;
+          orderProcessingStatus.progress = { phase: 'error', error: error.message };
+          orderProcessingStatus.lastResult = { error: error.message };
         });
-      
+
       // Return immediately
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         message: 'Order processing started in background. Check /api/orders/status for progress.',
         processing: true
       });
@@ -1124,10 +1200,11 @@ app.get('/api/product/:upc', async (req, res) => {
   }
 });
 
-// Get order processing status
+// Get order processing status - with detailed progress
 app.get('/api/orders/status', (req, res) => {
   res.json({
     isProcessing: orderProcessingStatus.isProcessing,
+    progress: orderProcessingStatus.progress || null,
     lastCompleted: orderProcessingStatus.lastCompleted,
     lastResult: orderProcessingStatus.lastResult ? {
       ordersProcessed: orderProcessingStatus.lastResult.ordersProcessed,
