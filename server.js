@@ -123,7 +123,7 @@ async function initDatabase() {
       CREATE TABLE IF NOT EXISTS order_items (
         id SERIAL PRIMARY KEY,
         order_id BIGINT REFERENCES orders(order_id) ON DELETE CASCADE,
-        variant_id BIGINT,
+        variant_id TEXT,
         product_id BIGINT,
         title TEXT,
         variant_title TEXT,
@@ -134,6 +134,18 @@ async function initDatabase() {
       );
     `);
     console.log('✅ Order items table ready');
+    
+    // 🔥 FIX: Convert variant_id from BIGINT to TEXT for custom items
+    console.log('🔧 Converting variant_id to TEXT for custom items...');
+    try {
+      await pool.query(`
+        ALTER TABLE order_items 
+        ALTER COLUMN variant_id TYPE TEXT USING variant_id::TEXT
+      `);
+      console.log('✅ variant_id converted to TEXT - custom items now supported!');
+    } catch (err) {
+      console.log('⚠️ variant_id conversion note:', err.message);
+    }
 
     // 🔥 FIX ALL MISSING COLUMNS FOR BEAST MODE
     console.log('🔧 Fixing missing columns for BEAST MODE...');
