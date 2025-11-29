@@ -1020,6 +1020,60 @@ app.post('/api/shopify', async (req, res) => {
   }
 });
 
+// DEBUG ENDPOINT: Check order item details
+app.get('/api/debug/order/:orderNumber', async (req, res) => {
+  const { orderNumber } = req.params;
+  
+  try {
+    console.log(`🔍 Debugging order #${orderNumber}...`);
+    
+    // Get the raw order_items data
+    const items = await pool.query(`
+      SELECT 
+        oi.id,
+        oi.variant_id,
+        oi.title,
+        oi.variant_title,
+        oi.quantity
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      WHERE o.order_number = $1
+      ORDER BY oi.id
+    `, [orderNumber]);
+    
+    // Calculate totals
+    const totalQuantity = items.rows.reduce((sum, item) => sum + parseInt(item.quantity || 0), 0);
+    const rowCount = items.rows.length;
+    
+    // Check for duplicates
+    const variantCounts = {};
+    items.rows.forEach(item => {
+      const key = item.variant_id;
+      variantCounts[key] = (variantCounts[key] || 0) + 1;
+    });
+    const duplicates = Object.entries(variantCounts).filter(([_, count]) => count > 1);
+    
+    console.log(`📊 Order #${orderNumber}: ${rowCount} rows, ${totalQuantity} total items`);
+    
+    res.json({
+      orderNumber: orderNumber,
+      rowCount: rowCount,
+      totalQuantity: totalQuantity,
+      hasDuplicates: duplicates.length > 0,
+      duplicateVariants: duplicates.map(([variantId, count]) => ({
+        variantId,
+        appearsCount: count
+      })),
+      items: items.rows,
+      quantities: items.rows.map(i => i.quantity)
+    });
+    
+  } catch (error) {
+    console.error('❌ Debug error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get product by UPC
 app.get('/api/product/:upc', async (req, res) => {
   const { upc } = req.params;
