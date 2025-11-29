@@ -211,6 +211,23 @@ async function initDatabase() {
       console.log('⚠️ Some indexes might already exist:', err.message);
     }
 
+    // Add unique constraint to prevent duplicate order items
+    console.log('🔒 Adding unique constraint to order_items...');
+    try {
+      await pool.query(`
+        ALTER TABLE order_items 
+        ADD CONSTRAINT unique_order_variant 
+        UNIQUE (order_id, variant_id)
+      `);
+      console.log('✅ Unique constraint added - duplicates now prevented!');
+    } catch (err) {
+      if (err.message.includes('already exists')) {
+        console.log('✅ Unique constraint already exists');
+      } else {
+        console.log('⚠️ Could not add constraint:', err.message);
+      }
+    }
+
     // Create metafields table
     console.log('🏷️ Creating metafields table...');
     await pool.query(`
@@ -699,7 +716,10 @@ async function importOrderData(storeName, accessToken) {
                 order_id, variant_id, product_id, title, variant_title,
                 quantity, price, cart_position, customer_is_returning
               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-              ON CONFLICT (id) DO NOTHING
+              ON CONFLICT (order_id, variant_id) DO UPDATE SET
+                quantity = EXCLUDED.quantity,
+                price = EXCLUDED.price,
+                cart_position = EXCLUDED.cart_position
             `, [
               order.id,
               item.variant_id,
@@ -1017,6 +1037,75 @@ app.post('/api/shopify', async (req, res) => {
     console.error('❌ API Error:', error);
     console.error('Stack:', error.stack);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// CLEANUP ENDPOINT: Remove duplicate order items
+app.post('/api/cleanup/duplicates', async (req, res) => {
+  try {
+    console.log('🧹 Starting duplicate cleanup...');
+    
+    // First, check how many duplicates exist
+    const duplicateCheck = await pool.query(`
+      SELECT 
+        oi.id,
+        oi.order_id,
+        oi.variant_id,
+        o.order_number
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      WHERE oi.id NOT IN (
+        SELECT MIN(id)
+        FROM order_items
+        GROUP BY order_id, variant_id
+      )
+    `);
+    
+    const duplicateCount = duplicateCheck.rows.length;
+    console.log(`⚠️ Found ${duplicateCount} duplicate rows`);
+    
+    if (duplicateCount === 0) {
+      return res.json({
+        success: true,
+        message: 'No duplicates found!',
+        duplicatesRemoved: 0
+      });
+    }
+    
+    // Delete duplicates (keeps first occurrence of each order+variant)
+    const deleteResult = await pool.query(`
+      DELETE FROM order_items
+      WHERE id NOT IN (
+        SELECT MIN(id)
+        FROM order_items
+        GROUP BY order_id, variant_id
+      )
+    `);
+    
+    console.log(`✅ Removed ${deleteResult.rowCount} duplicate rows`);
+    
+    // Verify the cleanup
+    const verification = await pool.query(`
+      SELECT 
+        COUNT(DISTINCT order_id) as affected_orders,
+        COUNT(*) as remaining_items
+      FROM order_items
+    `);
+    
+    res.json({
+      success: true,
+      message: `Cleanup complete! Removed ${deleteResult.rowCount} duplicate items.`,
+      duplicatesRemoved: deleteResult.rowCount,
+      affectedOrders: parseInt(verification.rows[0].affected_orders),
+      remainingItems: parseInt(verification.rows[0].remaining_items)
+    });
+    
+  } catch (error) {
+    console.error('❌ Cleanup error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
   }
 });
 
