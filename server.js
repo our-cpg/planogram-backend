@@ -891,7 +891,7 @@ app.post('/api/shopify', async (req, res) => {
             o.total_price,
             o.order_date,
             o.is_returning_customer,
-            COUNT(oi.id) as item_count
+            COALESCE(SUM(oi.quantity), 0) as item_count
           FROM orders o
           LEFT JOIN order_items oi ON o.order_id = oi.order_id
           GROUP BY o.order_id, o.order_number, o.customer_email_hash, o.total_price, o.order_date, o.is_returning_customer
