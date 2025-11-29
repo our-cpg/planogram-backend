@@ -832,6 +832,44 @@ async function importOrderData(storeName, accessToken) {
   }
 }
 
+
+// ============================================
+// ROOT ROUTES (Health Check & API Info)
+// ============================================
+
+// Root route - Health check
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'ok',
+    service: 'Planogram Backend v2.0',
+    version: '2.0.0',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// API info route
+app.get('/api', (req, res) => {
+  res.json({
+    service: 'Planogram Backend API',
+    version: '2.0',
+    endpoints: [
+      'GET / - Health check',
+      'GET /api - API info',
+      'POST /api/shopify - Main Shopify operations',
+      'GET /api/orders/status - Order processing status',
+      'GET /api/products/all - Get all products',
+      'GET /api/stats - Database stats',
+      'GET /api/correlations - Product correlations',
+      'GET /api/product/:upc - Get product by UPC',
+      'GET /api/debug/order/:orderNumber - Debug specific order',
+      'POST /api/cleanup/duplicates - Remove duplicate orders',
+      'POST /api/settings - Store settings for auto-refresh'
+    ]
+  });
+});
+
+// ============================================
 // Main API endpoint
 app.post('/api/shopify', async (req, res) => {
   const { storeName, accessToken, action } = req.body;
