@@ -945,14 +945,17 @@ app.post('/api/shopify', async (req, res) => {
           totalSales: parseFloat(stats.total_sales) || 0,
           avgOrderValue: parseFloat(stats.avg_order_value) || 0,
           recentOrders: recentOrders.rows.map(order => ({
-            orderId: order.order_id,
-            orderNumber: order.order_number,
-            customerEmail: order.customer_email_hash ? `****${order.customer_email_hash.substring(0, 4)}` : 'Guest',
-            total: parseFloat(order.total_price),
-            date: order.order_date,
-            itemCount: parseInt(order.item_count),
-            isReturning: order.is_returning_customer,
-            status: order.total_price > 0 ? 'paid' : 'pending'
+            id: order.order_id,
+            order_number: order.order_number,
+            created_at: order.order_date,
+            total_price: parseFloat(order.total_price).toFixed(2),
+            financial_status: order.total_price > 0 ? 'paid' : 'pending',
+            customer: {
+              first_name: 'Guest',
+              last_name: ''
+            },
+            // Create a fake line_items array with the correct length for counting
+            line_items: Array(parseInt(order.item_count) || 0).fill({ quantity: 1 })
           })),
           salesByPeriod: {
             today: {
