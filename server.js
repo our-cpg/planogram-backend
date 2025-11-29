@@ -704,11 +704,13 @@ async function importOrderData(storeName, accessToken) {
         // Process line items
         let cartPosition = 1;
         for (const item of order.line_items) {
-          // Skip items without variant_id (gift cards, shipping, etc.)
-          if (!item.variant_id || !item.product_id) {
-            console.log(`⚠️ Skipping line item without variant_id in order ${order.id}`);
-            continue;
-          }
+          // Handle custom sale items (no variant_id/product_id)
+          const isCustomSale = !item.variant_id || !item.product_id;
+          
+          // Use special IDs for custom items
+          const variantId = isCustomSale ? `custom_${order.id}_${cartPosition}` : item.variant_id;
+          const productId = isCustomSale ? `custom_${order.id}_${cartPosition}` : item.product_id;
+          const itemTitle = item.title || item.name || 'Custom Sale';
 
           try {
             await pool.query(`
@@ -722,10 +724,10 @@ async function importOrderData(storeName, accessToken) {
                 cart_position = EXCLUDED.cart_position
             `, [
               order.id,
-              item.variant_id,
-              item.product_id,
-              item.title || item.name || 'Unknown Product',
-              item.variant_title || '',
+              variantId,
+              productId,
+              itemTitle,
+              item.variant_title || (isCustomSale ? 'Custom Item' : ''),
               item.quantity || 1,
               parseFloat(item.price) || 0,
               cartPosition++,
