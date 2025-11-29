@@ -881,7 +881,44 @@ app.post('/api/shopify', async (req, res) => {
   try {
     console.log(`📥 API Request: ${action}`);
 
-    if (action === 'refreshInventory') {
+    if (action === 'testConnection') {
+      // Simple test - just verify we can connect to Shopify
+      console.log('🧪 Testing Shopify connection...');
+      
+      try {
+        const testUrl = `https://${storeName}/admin/api/2024-01/shop.json`;
+        const testResponse = await fetch(testUrl, {
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (testResponse.ok) {
+          const shopData = await testResponse.json();
+          return res.json({
+            success: true,
+            message: `Connected to ${shopData.shop.name}!`,
+            shopName: shopData.shop.name,
+            domain: shopData.shop.domain
+          });
+        } else {
+          const errorText = await testResponse.text();
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid credentials or store name',
+            details: errorText
+          });
+        }
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          error: 'Failed to connect to Shopify',
+          details: error.message
+        });
+      }
+
+    } else if (action === 'refreshInventory') {
       const productCount = await fetchAllProducts(storeName, accessToken);
       const costCount = await fetchInventoryCosts(storeName, accessToken);
       const salesData = await importSalesData(storeName, accessToken);
