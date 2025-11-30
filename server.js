@@ -1616,6 +1616,18 @@ app.get('/api/correlations', async (req, res) => {
   try {
     console.log('🤝 Fetching top product correlations...');
     
+    // First, let's see the distribution of counts
+    const statsResult = await pool.query(`
+      SELECT 
+        co_purchase_count,
+        COUNT(*) as num_pairs
+      FROM product_correlations
+      GROUP BY co_purchase_count
+      ORDER BY co_purchase_count DESC
+      LIMIT 10
+    `);
+    console.log('📊 Top co-purchase counts:', statsResult.rows);
+    
     const result = await pool.query(`
       SELECT 
         pa.title as product_a_name,
@@ -1651,6 +1663,11 @@ app.get('/api/correlations', async (req, res) => {
     }));
 
     console.log(`✅ Returning ${correlations.length} correlations`);
+    console.log(`📦 Sample: ${correlations[0]?.productA.name} + ${correlations[0]?.productB.name} = ${correlations[0]?.timesBoughtTogether} times`);
+    if (correlations.length > 10) {
+      console.log(`📦 Sample #10: ${correlations[10]?.productA.name} + ${correlations[10]?.productB.name} = ${correlations[10]?.timesBoughtTogether} times`);
+    }
+    
     res.json({ correlations });
   } catch (error) {
     console.error('❌ Correlations error:', error);
