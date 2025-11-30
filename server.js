@@ -1632,7 +1632,7 @@ app.get('/api/correlations', async (req, res) => {
       JOIN products pa ON pa.product_id = pc.product_a_id
       JOIN products pb ON pb.product_id = pc.product_b_id
       ORDER BY pc.co_purchase_count DESC, pc.correlation_score DESC
-      LIMIT 20
+      LIMIT 50
     `);
 
     const correlations = result.rows.map(r => ({
@@ -1650,6 +1650,7 @@ app.get('/api/correlations', async (req, res) => {
       correlationScore: parseFloat(r.correlation_score)
     }));
 
+    console.log(`✅ Returning ${correlations.length} correlations`);
     res.json({ correlations });
   } catch (error) {
     console.error('❌ Correlations error:', error);
