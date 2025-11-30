@@ -633,7 +633,7 @@ async function importSalesData(storeName, accessToken) {
 }
 
 // 🔥 BEAST MODE: Import full order data for customer analytics - FULLY FIXED
-async function importOrderData(storeName, accessToken) {
+async function importOrderData(storeName, accessToken, options = {}) {
   console.log('🛒🔥 BEAST MODE: Starting order data import...');
   
   try {
@@ -641,12 +641,18 @@ async function importOrderData(storeName, accessToken) {
     let hasNextPage = true;
     let pageInfo = null;
     let pageCount = 0;
-    const MAX_PAGES = 100; // Increased limit for more orders
+    const MAX_PAGES = options.fetchAll ? 500 : 100; // More pages if fetching all
 
-    // Fetch orders from Shopify - get last 6 months only
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-    console.log(`📅 Fetching orders from last 6 months (since ${sixMonthsAgo.toISOString().split('T')[0]})...`);
+    // Use provided start date or default to 6 months ago
+    let startDate;
+    if (options.created_at_min) {
+      startDate = new Date(options.created_at_min);
+      console.log(`📅 Fetching ALL orders from ${startDate.toISOString().split('T')[0]} (custom range)...`);
+    } else {
+      startDate = new Date();
+      startDate.setMonth(startDate.getMonth() - 6);
+      console.log(`📅 Fetching orders from last 6 months (since ${startDate.toISOString().split('T')[0]})...`);
+    }
 
     while (hasNextPage && pageCount < MAX_PAGES) {
       let url;
@@ -654,8 +660,8 @@ async function importOrderData(storeName, accessToken) {
         // When paginating, ONLY use page_info and limit
         url = `https://${storeName}/admin/api/2024-10/orders.json?page_info=${pageInfo}&limit=250`;
       } else {
-        // First request: get orders from last 6 months
-        url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&status=any&created_at_min=${sixMonthsAgo.toISOString()}`;
+        // First request: get orders from start date
+        url = `https://${storeName}/admin/api/2024-10/orders.json?limit=250&status=any&created_at_min=${startDate.toISOString()}`;
       }
 
       const response = await fetch(url, {
@@ -998,7 +1004,13 @@ app.post('/api/shopify', async (req, res) => {
       orderProcessingStatus.isProcessing = true;
       
       // Start processing in background (don't await)
-      importOrderData(storeName, accessToken)
+      // Pass date parameters from frontend request
+      const importOptions = {
+        created_at_min: req.body.created_at_min,
+        created_at_max: req.body.created_at_max,
+        fetchAll: req.body.fetchAll
+      };
+      importOrderData(storeName, accessToken, importOptions)
         .then(result => {
           console.log(`✅ Background processing complete: ${result.ordersProcessed} orders`);
           orderProcessingStatus.isProcessing = false;
@@ -1192,6 +1204,40 @@ app.post('/api/shopify', async (req, res) => {
         salesUpdated: salesData.updated,
         message: `Inventory refreshed: ${productCount} products, ${costCount} costs, ${salesData.updated} sales records`
       });
+      
+    } else if (action === 'getOrders') {
+      // Return raw orders from database for frontend analysis
+      console.log('📦 Fetching all orders for frontend analysis...');
+      
+      try {
+        const ordersResult = await pool.query(`
+          SELECT 
+            order_id as id,
+            order_number,
+            total_price,
+            order_date as created_at,
+            customer_id,
+            is_returning_customer
+          FROM orders
+          ORDER BY order_date DESC
+        `);
+        
+        console.log(`✅ Returning ${ordersResult.rows.length} orders for analysis`);
+        
+        res.json({
+          success: true,
+          orders: ordersResult.rows.map(row => ({
+            id: row.id,
+            order_number: row.order_number,
+            total_price: row.total_price,
+            created_at: row.created_at,
+            customer_id: row.customer_id
+          }))
+        });
+      } catch (error) {
+        console.error('❌ Error fetching orders:', error);
+        res.status(500).json({ error: 'Failed to fetch orders' });
+      }
       
     } else {
       res.status(400).json({ error: 'Invalid action' });
