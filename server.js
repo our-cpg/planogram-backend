@@ -47,7 +47,7 @@ async function initDatabase() {
     console.log('📦 Creating products table...');
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
-        variant_id BIGINT PRIMARY KEY,
+        variant_id TEXT PRIMARY KEY,
         product_id BIGINT NOT NULL,
         title TEXT NOT NULL,
         variant_title TEXT,
@@ -135,11 +135,25 @@ async function initDatabase() {
     `);
     console.log('✅ Order items table ready');
     
-    // 🔥 FIX: Convert variant_id from BIGINT to TEXT for custom items
-    console.log('🔧 Converting variant_id to TEXT for custom items...');
+    // 🔥 FIX: Convert variant_id from BIGINT to TEXT in BOTH tables for custom items
+    console.log('🔧 Converting variant_id to TEXT in products and order_items...');
+    
+    // Convert products.variant_id first
+    try {
+      console.log('  Converting products.variant_id to TEXT...');
+      await pool.query(`
+        ALTER TABLE products 
+        ALTER COLUMN variant_id TYPE TEXT USING variant_id::TEXT
+      `);
+      console.log('  ✅ products.variant_id converted to TEXT');
+    } catch (err) {
+      console.error('  ❌ products.variant_id conversion failed:', err.message);
+    }
+    
+    // Convert order_items.variant_id
     try {
       // Step 1: Drop unique constraint if it exists
-      console.log('  Dropping unique constraint...');
+      console.log('  Dropping unique constraint on order_items...');
       try {
         await pool.query(`ALTER TABLE order_items DROP CONSTRAINT IF EXISTS unique_order_variant`);
         console.log('  ✅ Constraint dropped');
@@ -148,12 +162,12 @@ async function initDatabase() {
       }
       
       // Step 2: Change column type
-      console.log('  Converting variant_id to TEXT...');
+      console.log('  Converting order_items.variant_id to TEXT...');
       await pool.query(`
         ALTER TABLE order_items 
         ALTER COLUMN variant_id TYPE TEXT USING variant_id::TEXT
       `);
-      console.log('  ✅ variant_id converted to TEXT');
+      console.log('  ✅ order_items.variant_id converted to TEXT');
       
       // Step 3: Recreate unique constraint
       console.log('  Recreating unique constraint...');
@@ -168,7 +182,7 @@ async function initDatabase() {
         console.log('  ⚠️ Constraint already exists or error:', err.message);
       }
       
-      console.log('✅ variant_id migration complete - custom items now supported!');
+      console.log('✅ variant_id migration complete - custom items now supported in BOTH tables!');
     } catch (err) {
       console.error('❌ variant_id conversion FAILED:', err.message);
       console.error('   This will prevent custom items from being imported!');
