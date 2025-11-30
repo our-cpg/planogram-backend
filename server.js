@@ -1577,14 +1577,14 @@ app.get('/api/products/all', async (req, res) => {
         p.cost,
         p.inventory_quantity,
         p.vendor,
-        p.distributor,
+        COALESCE(p.distributor, '') as distributor,
         p.tags,
         COALESCE(s.daily_sales, 0) as daily_sales,
         COALESCE(s.weekly_sales, 0) as weekly_sales,
         COALESCE(s.monthly_sales, 0) as monthly_sales,
         COALESCE(s.all_time_sales, 0) as all_time_sales
       FROM products p
-      LEFT JOIN sales_data s ON p.variant_id = s.variant_id
+      LEFT JOIN sales_data s ON p.variant_id = s.variant_id::TEXT
       ORDER BY p.title, p.variant_title
     `);
     
