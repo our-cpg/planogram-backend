@@ -1094,18 +1094,39 @@ app.post('/api/shopify', async (req, res) => {
           uniqueCustomers: parseInt(stats.unique_customers) || 0,
           totalSales: parseFloat(stats.total_sales) || 0,
           avgOrderValue: parseFloat(stats.avg_order_value) || 0,
-          recentOrders: recentOrders.rows.map(order => ({
-            id: order.order_id,
-            order_number: order.order_number,
-            created_at: order.order_date,
-            total_price: parseFloat(order.total_price).toFixed(2),
-            financial_status: order.total_price > 0 ? 'paid' : 'pending',
-            customer: {
-              first_name: 'Guest',
-              last_name: ''
-            },
-            // Create a fake line_items array with the correct length for counting
-            line_items: Array(parseInt(order.item_count) || 0).fill({ quantity: 1 })
+          recentOrders: await Promise.all(recentOrders.rows.map(async (order) => {
+            // Fetch REAL line items for this order
+            const lineItemsResult = await pool.query(`
+              SELECT 
+                title,
+                variant_title,
+                quantity,
+                price,
+                variant_id as sku
+              FROM order_items
+              WHERE order_id = $1
+              ORDER BY cart_position
+            `, [order.order_id]);
+            
+            return {
+              id: order.order_id,
+              order_number: order.order_number,
+              created_at: order.order_date,
+              total_price: parseFloat(order.total_price).toFixed(2),
+              financial_status: order.total_price > 0 ? 'paid' : 'pending',
+              customer: {
+                first_name: 'Guest',
+                last_name: ''
+              },
+              // Return REAL line items with all data
+              line_items: lineItemsResult.rows.map(item => ({
+                title: item.title,
+                variant_title: item.variant_title,
+                quantity: item.quantity,
+                price: parseFloat(item.price),
+                sku: item.sku
+              }))
+            };
           })),
           salesByPeriod: {
             today: {
