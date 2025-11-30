@@ -252,18 +252,22 @@ async function initDatabase() {
       console.log('⚠️ Customer stats column note:', err.message);
     }
 
-    // Create product_correlations table (BEAST MODE)
+    // Create product_correlations table (BEAST MODE) - FIXED to use variant_id
     console.log('🤝 Creating product_correlations table...');
+    
+    // Drop old table if it exists (schema change)
+    await pool.query(`DROP TABLE IF EXISTS product_correlations;`);
+    
     await pool.query(`
       CREATE TABLE IF NOT EXISTS product_correlations (
-        product_a_id BIGINT,
-        product_b_id BIGINT,
+        variant_a_id TEXT,
+        variant_b_id TEXT,
         co_purchase_count INTEGER DEFAULT 0,
         correlation_score DECIMAL(5,4) DEFAULT 0,
-        PRIMARY KEY (product_a_id, product_b_id)
+        PRIMARY KEY (variant_a_id, variant_b_id)
       );
     `);
-    console.log('✅ Product correlations table ready');
+    console.log('✅ Product correlations table ready (using variant_id for accurate tracking)');
 
     // Create indexes for performance
     try {
@@ -845,24 +849,24 @@ async function importOrderData(storeName, accessToken, options = {}) {
         last_order_date = EXCLUDED.last_order_date
     `);
 
-    // Calculate product correlations
-    console.log('🤝 Calculating product correlations...');
+    // Calculate product correlations - FIXED to use variant_id for unique pairs
+    console.log('🤝 Calculating product correlations (by variant for accurate tracking)...');
     await pool.query(`
-      INSERT INTO product_correlations (product_a_id, product_b_id, co_purchase_count, correlation_score)
+      INSERT INTO product_correlations (variant_a_id, variant_b_id, co_purchase_count, correlation_score)
       SELECT 
-        a.product_id as product_a_id,
-        b.product_id as product_b_id,
+        a.variant_id as variant_a_id,
+        b.variant_id as variant_b_id,
         COUNT(*) as co_purchase_count,
         COUNT(*)::decimal / (
           SELECT COUNT(DISTINCT order_id) 
           FROM order_items 
-          WHERE product_id IN (a.product_id, b.product_id)
+          WHERE variant_id IN (a.variant_id, b.variant_id)
         ) as correlation_score
       FROM order_items a
-      JOIN order_items b ON a.order_id = b.order_id AND a.product_id < b.product_id
-      GROUP BY a.product_id, b.product_id
+      JOIN order_items b ON a.order_id = b.order_id AND a.variant_id < b.variant_id
+      GROUP BY a.variant_id, b.variant_id
       HAVING COUNT(*) > 1
-      ON CONFLICT (product_a_id, product_b_id) DO UPDATE SET
+      ON CONFLICT (variant_a_id, variant_b_id) DO UPDATE SET
         co_purchase_count = EXCLUDED.co_purchase_count,
         correlation_score = EXCLUDED.correlation_score
     `);
@@ -1434,7 +1438,7 @@ app.get('/api/product/:upc', async (req, res) => {
 
     const analytics = analyticsResult.rows[0] || {};
 
-    // Get products bought together
+    // Get products bought together (using variant_id for accurate tracking)
     const correlationsResult = await pool.query(`
       SELECT 
         p.title as product_name,
@@ -1442,11 +1446,11 @@ app.get('/api/product/:upc', async (req, res) => {
         pc.co_purchase_count,
         pc.correlation_score
       FROM product_correlations pc
-      JOIN products p ON p.product_id = pc.product_b_id
-      WHERE pc.product_a_id = $1
+      JOIN products p ON p.variant_id = pc.variant_b_id
+      WHERE pc.variant_a_id = $1
       ORDER BY pc.co_purchase_count DESC, pc.correlation_score DESC
       LIMIT 5
-    `, [product.product_id]);
+    `, [product.variant_id]);
 
     const boughtTogether = correlationsResult.rows.map(r => ({
       name: r.variant_title ? `${r.product_name} - ${r.variant_title}` : r.product_name,
@@ -1641,8 +1645,8 @@ app.get('/api/correlations', async (req, res) => {
         pc.co_purchase_count,
         pc.correlation_score
       FROM product_correlations pc
-      JOIN products pa ON pa.product_id = pc.product_a_id
-      JOIN products pb ON pb.product_id = pc.product_b_id
+      JOIN products pa ON pa.variant_id = pc.variant_a_id
+      JOIN products pb ON pb.variant_id = pc.variant_b_id
       ORDER BY pc.co_purchase_count DESC, pc.correlation_score DESC
       LIMIT 50
     `);
