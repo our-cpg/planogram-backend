@@ -1049,12 +1049,25 @@ app.post('/api/shopify', async (req, res) => {
           LIMIT 50
         `);
 
-        // Get sales by time period
+        // Get sales by time period - ADJUSTED FOR DENVER TIMEZONE (MST/MDT = UTC-7)
         const now = new Date();
-        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        
+        // Calculate "today" in Denver time (UTC-7)
+        // Convert current UTC time to Denver time, then get midnight
+        const denverOffset = -7 * 60; // MST/MDT offset in minutes
+        const denverNow = new Date(now.getTime() + denverOffset * 60 * 1000);
+        const denverMidnight = new Date(denverNow.getFullYear(), denverNow.getMonth(), denverNow.getDate());
+        // Convert back to UTC for database comparison
+        const todayStart = new Date(denverMidnight.getTime() - denverOffset * 60 * 1000);
+        
         const weekStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
         const yearStart = new Date(now.getFullYear(), 0, 1);
+        
+        console.log(`📅 Date range - Today starts at: ${todayStart.toISOString()} (Denver midnight in UTC)`);
+        console.log(`📅 Current UTC time: ${now.toISOString()}`);
+        console.log(`📅 Denver local time: ~${denverNow.toISOString().replace('T', ' ').split('.')[0]}`);
+
 
         const salesByPeriod = await pool.query(`
           SELECT 
