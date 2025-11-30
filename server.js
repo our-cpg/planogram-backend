@@ -100,7 +100,7 @@ async function initDatabase() {
     `);
     console.log('✅ Sales data table ready');
 
-    // Create orders table (BEAST MODE)
+    // Create orders table (Order Blitz)
     console.log('📋 Creating orders table...');
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
@@ -129,14 +129,14 @@ async function initDatabase() {
       console.log('⚠️ order_date conversion note:', err.message);
     }
 
-    // Create order_items table (BEAST MODE)
+    // Create order_items table (Order Blitz)
     console.log('📦 Creating order_items table...');
     await pool.query(`
       CREATE TABLE IF NOT EXISTS order_items (
         id SERIAL PRIMARY KEY,
         order_id BIGINT REFERENCES orders(order_id) ON DELETE CASCADE,
         variant_id TEXT,
-        product_id BIGINT,
+        product_id TEXT,
         title TEXT,
         variant_title TEXT,
         quantity INTEGER,
@@ -162,37 +162,94 @@ async function initDatabase() {
       console.error('  ❌ products.variant_id conversion failed:', err.message);
     }
     
-    // Convert order_items.variant_id
+    // Convert order_items.variant_id - MORE AGGRESSIVE APPROACH
     try {
-      // Step 1: Drop unique constraint if it exists
-      console.log('  Dropping unique constraint on order_items...');
-      try {
-        await pool.query(`ALTER TABLE order_items DROP CONSTRAINT IF EXISTS unique_order_variant`);
-        console.log('  ✅ Constraint dropped');
-      } catch (err) {
-        console.log('  ⚠️ Constraint drop note:', err.message);
-      }
-      
-      // Step 2: Change column type
-      console.log('  Converting order_items.variant_id to TEXT...');
-      await pool.query(`
-        ALTER TABLE order_items 
-        ALTER COLUMN variant_id TYPE TEXT USING variant_id::TEXT
+      // Check current column type
+      const typeCheck = await pool.query(`
+        SELECT data_type 
+        FROM information_schema.columns 
+        WHERE table_name = 'order_items' AND column_name = 'variant_id'
       `);
-      console.log('  ✅ order_items.variant_id converted to TEXT');
       
-      // Step 3: Recreate unique constraint
-      console.log('  Recreating unique constraint...');
+      const currentType = typeCheck.rows[0]?.data_type;
+      console.log(`  Current order_items.variant_id type: ${currentType}`);
+      
+      if (currentType !== 'text') {
+        // Step 1: Drop unique constraint if it exists
+        console.log('  Dropping unique constraint on order_items...');
+        try {
+          await pool.query(`ALTER TABLE order_items DROP CONSTRAINT IF EXISTS unique_order_variant`);
+          console.log('  ✅ Constraint dropped');
+        } catch (err) {
+          console.log('  ⚠️ Constraint drop note:', err.message);
+        }
+        
+        // Step 2: Change column type with USING clause
+        console.log('  Converting order_items.variant_id to TEXT...');
+        await pool.query(`
+          ALTER TABLE order_items 
+          ALTER COLUMN variant_id TYPE TEXT USING variant_id::TEXT
+        `);
+        console.log('  ✅ order_items.variant_id converted to TEXT');
+        
+        // Step 3: Recreate unique constraint
+        console.log('  Recreating unique constraint...');
+        try {
+          await pool.query(`
+            ALTER TABLE order_items 
+            ADD CONSTRAINT unique_order_variant 
+            UNIQUE (order_id, variant_id)
+          `);
+          console.log('  ✅ Constraint recreated');
+        } catch (err) {
+          console.log('  ⚠️ Constraint already exists or error:', err.message);
+        }
+      } else {
+        console.log('  ✅ order_items.variant_id is already TEXT');
+      }
+    } catch (err) {
+      console.error('  ❌ order_items.variant_id conversion failed:', err.message);
+      console.error('  🔧 Attempting alternative approach - drop and recreate column...');
+      
       try {
+        // Last resort: Drop and recreate the column
+        await pool.query(`ALTER TABLE order_items DROP COLUMN IF EXISTS variant_id`);
+        await pool.query(`ALTER TABLE order_items ADD COLUMN variant_id TEXT`);
         await pool.query(`
           ALTER TABLE order_items 
           ADD CONSTRAINT unique_order_variant 
           UNIQUE (order_id, variant_id)
         `);
-        console.log('  ✅ Constraint recreated');
-      } catch (err) {
-        console.log('  ⚠️ Constraint already exists or error:', err.message);
+        console.log('  ✅ order_items.variant_id recreated as TEXT');
+      } catch (recreateErr) {
+        console.error('  ❌ Column recreation failed:', recreateErr.message);
       }
+    }
+    
+    // Convert order_items.product_id to TEXT as well (for custom items)
+    try {
+      const typeCheck = await pool.query(`
+        SELECT data_type 
+        FROM information_schema.columns 
+        WHERE table_name = 'order_items' AND column_name = 'product_id'
+      `);
+      
+      const currentType = typeCheck.rows[0]?.data_type;
+      console.log(`  Current order_items.product_id type: ${currentType}`);
+      
+      if (currentType !== 'text') {
+        console.log('  Converting order_items.product_id to TEXT...');
+        await pool.query(`
+          ALTER TABLE order_items 
+          ALTER COLUMN product_id TYPE TEXT USING product_id::TEXT
+        `);
+        console.log('  ✅ order_items.product_id converted to TEXT');
+      } else {
+        console.log('  ✅ order_items.product_id is already TEXT');
+      }
+    } catch (err) {
+      console.error('  ❌ order_items.product_id conversion failed:', err.message);
+    }
       
       console.log('✅ variant_id migration complete - custom items now supported in BOTH tables!');
     } catch (err) {
@@ -200,8 +257,8 @@ async function initDatabase() {
       console.error('   This will prevent custom items from being imported!');
     }
 
-    // 🔥 FIX ALL MISSING COLUMNS FOR BEAST MODE
-    console.log('🔧 Fixing missing columns for BEAST MODE...');
+    // 🔥 FIX ALL MISSING COLUMNS FOR Order Blitz
+    console.log('🔧 Fixing missing columns for Order Blitz...');
     
     // Fix missing title and variant_title columns
     try {
@@ -226,7 +283,7 @@ async function initDatabase() {
       console.log('⚠️ Customer returning column note:', err.message);
     }
 
-    // Create customer_stats table (BEAST MODE)
+    // Create customer_stats table (Order Blitz)
     console.log('👥 Creating customer_stats table...');
     await pool.query(`
       CREATE TABLE IF NOT EXISTS customer_stats (
@@ -252,7 +309,7 @@ async function initDatabase() {
       console.log('⚠️ Customer stats column note:', err.message);
     }
 
-    // Create product_correlations table (BEAST MODE) - FIXED to use variant_id
+    // Create product_correlations table (Order Blitz) - FIXED to use variant_id
     console.log('🤝 Creating product_correlations table...');
     
     // Drop old table if it exists (schema change)
@@ -323,7 +380,7 @@ async function initDatabase() {
       console.log('⚠️ Metafields index might already exist:', err.message);
     }
 
-    console.log('🔥🔥🔥 BEAST MODE DATABASE READY WITH ALL FIXES!');
+    console.log('✅ Order Blitz database ready with all fixes!');
   } catch (error) {
     console.error('❌ Database init error:', error.message);
     throw error;
@@ -648,9 +705,9 @@ async function importSalesData(storeName, accessToken) {
   }
 }
 
-// 🔥 BEAST MODE: Import full order data for customer analytics - FULLY FIXED
+// 🔥 Order Blitz: Import full order data for customer analytics - FULLY FIXED
 async function importOrderData(storeName, accessToken, options = {}) {
-  console.log('🛒🔥 BEAST MODE: Starting order data import...');
+  console.log('🛒🔥 Order Blitz: Starting order data import...');
   
   try {
     let allOrders = [];
@@ -726,7 +783,7 @@ async function importOrderData(storeName, accessToken, options = {}) {
         ordersProcessed: 0,
         itemsProcessed: 0,
         ordersWithoutCustomers: 0,
-        message: 'No orders found. Add some orders to your Shopify store to enable BEAST MODE analytics!',
+        message: 'No orders found. Add some orders to your Shopify store to enable Order Blitz analytics!',
         analytics: null
       };
     }
@@ -871,7 +928,7 @@ async function importOrderData(storeName, accessToken, options = {}) {
         correlation_score = EXCLUDED.correlation_score
     `);
 
-    console.log(`✅🔥 BEAST MODE COMPLETE: ${ordersProcessed} orders, ${itemsProcessed} items processed!`);
+    console.log(`✅🔥 Order Blitz COMPLETE: ${ordersProcessed} orders, ${itemsProcessed} items processed!`);
     console.log(`📊 Orders without customers (guest checkouts): ${ordersWithoutCustomers}`);
 
     // Get analytics summary
@@ -892,7 +949,7 @@ async function importOrderData(storeName, accessToken, options = {}) {
       ordersProcessed,
       itemsProcessed,
       ordersWithoutCustomers,
-      message: `Beast mode engaged! ${ordersProcessed} orders analyzed (${ordersWithoutCustomers} guest orders).`,
+      message: `Order Blitz complete! ${ordersProcessed} orders analyzed (${ordersWithoutCustomers} guest orders).`,
       analytics: {
         totalOrders: parseInt(analytics.total_orders) || 0,
         uniqueCustomers: parseInt(analytics.unique_customers) || 0,
@@ -902,7 +959,7 @@ async function importOrderData(storeName, accessToken, options = {}) {
     };
 
   } catch (error) {
-    console.error('❌ BEAST MODE failed:', error);
+    console.error('❌ Order Blitz failed:', error);
     throw error;
   }
 }
@@ -1007,7 +1064,7 @@ app.post('/api/shopify', async (req, res) => {
       });
 
     } else if (action === 'refreshOrders') {
-      console.log('🔥🛒 BEAST MODE ORDER REFRESH REQUESTED...');
+      console.log('🔥🛒 Order Blitz ORDER REFRESH REQUESTED...');
       
       if (orderProcessingStatus.isProcessing) {
         return res.json({
@@ -1423,7 +1480,7 @@ app.get('/api/product/:upc', async (req, res) => {
     const product = result.rows[0];
     console.log(`✅ Found: ${product.title}`);
 
-    // 🔥 BEAST MODE: Get analytics data
+    // 🔥 Order Blitz: Get analytics data
     const analyticsResult = await pool.query(`
       SELECT 
         COUNT(DISTINCT oi.order_id) as times_purchased,
@@ -1479,7 +1536,7 @@ app.get('/api/product/:upc', async (req, res) => {
       tags: product.tags,
       createdAt: product.created_at,
       updatedAt: product.updated_at,
-      // 🔥 BEAST MODE Analytics
+      // 🔥 Order Blitz Analytics
       analytics: {
         timesPurchased: parseInt(analytics.times_purchased) || 0,
         averageOrderValue: parseFloat(analytics.average_order_value) || 0,
@@ -1681,12 +1738,12 @@ app.get('/api/correlations', async (req, res) => {
 
 // Start server
 async function startServer() {
-  console.log('🚀 Starting Planogram Backend v2.0 (Sales Tracking + BEAST MODE)...');
+  console.log('🚀 Starting Planogram Backend v2.0 (Sales Tracking + Order Blitz)...');
   await initDatabase();
   app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`📊 Sales tracking: ENABLED`);
-    console.log(`🔥 BEAST MODE: READY`);
+    console.log(`🔥 Order Blitz: READY`);
     console.log(`🔥 ALL DATABASE FIXES: APPLIED`);
     console.log(`🔗 Test at: http://localhost:${PORT}`);
   });
