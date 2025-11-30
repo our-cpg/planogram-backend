@@ -934,7 +934,7 @@ async function importOrderData(storeName, accessToken, options = {}) {
         COALESCE(AVG(total_price), 0) as avg_order_value
       FROM orders
       WHERE order_date >= $1
-    `, [sixMonthsAgo]);
+    `, [startDate]);
 
     const analytics = analyticsResult.rows[0];
 
