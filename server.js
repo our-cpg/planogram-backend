@@ -111,11 +111,23 @@ async function initDatabase() {
         total_price DECIMAL(10,2),
         subtotal_price DECIMAL(10,2),
         total_tax DECIMAL(10,2),
-        order_date TIMESTAMP,
+        order_date TIMESTAMPTZ,
         is_returning_customer BOOLEAN DEFAULT FALSE
       );
     `);
     console.log('✅ Orders table ready');
+
+    // 🔥 FIX: Convert order_date to TIMESTAMPTZ to properly store UTC timestamps
+    console.log('🔧 Converting order_date to TIMESTAMPTZ...');
+    try {
+      await pool.query(`
+        ALTER TABLE orders 
+        ALTER COLUMN order_date TYPE TIMESTAMPTZ USING order_date AT TIME ZONE 'UTC'
+      `);
+      console.log('✅ order_date converted to TIMESTAMPTZ - timezone data now preserved!');
+    } catch (err) {
+      console.log('⚠️ order_date conversion note:', err.message);
+    }
 
     // Create order_items table (BEAST MODE)
     console.log('📦 Creating order_items table...');
