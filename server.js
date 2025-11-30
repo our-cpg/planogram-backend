@@ -250,12 +250,6 @@ async function initDatabase() {
     } catch (err) {
       console.error('  ❌ order_items.product_id conversion failed:', err.message);
     }
-      
-      console.log('✅ variant_id migration complete - custom items now supported in BOTH tables!');
-    } catch (err) {
-      console.error('❌ variant_id conversion FAILED:', err.message);
-      console.error('   This will prevent custom items from being imported!');
-    }
 
     // 🔥 FIX ALL MISSING COLUMNS FOR Order Blitz
     console.log('🔧 Fixing missing columns for Order Blitz...');
