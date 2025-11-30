@@ -138,13 +138,40 @@ async function initDatabase() {
     // 🔥 FIX: Convert variant_id from BIGINT to TEXT for custom items
     console.log('🔧 Converting variant_id to TEXT for custom items...');
     try {
+      // Step 1: Drop unique constraint if it exists
+      console.log('  Dropping unique constraint...');
+      try {
+        await pool.query(`ALTER TABLE order_items DROP CONSTRAINT IF EXISTS unique_order_variant`);
+        console.log('  ✅ Constraint dropped');
+      } catch (err) {
+        console.log('  ⚠️ Constraint drop note:', err.message);
+      }
+      
+      // Step 2: Change column type
+      console.log('  Converting variant_id to TEXT...');
       await pool.query(`
         ALTER TABLE order_items 
         ALTER COLUMN variant_id TYPE TEXT USING variant_id::TEXT
       `);
-      console.log('✅ variant_id converted to TEXT - custom items now supported!');
+      console.log('  ✅ variant_id converted to TEXT');
+      
+      // Step 3: Recreate unique constraint
+      console.log('  Recreating unique constraint...');
+      try {
+        await pool.query(`
+          ALTER TABLE order_items 
+          ADD CONSTRAINT unique_order_variant 
+          UNIQUE (order_id, variant_id)
+        `);
+        console.log('  ✅ Constraint recreated');
+      } catch (err) {
+        console.log('  ⚠️ Constraint already exists or error:', err.message);
+      }
+      
+      console.log('✅ variant_id migration complete - custom items now supported!');
     } catch (err) {
-      console.log('⚠️ variant_id conversion note:', err.message);
+      console.error('❌ variant_id conversion FAILED:', err.message);
+      console.error('   This will prevent custom items from being imported!');
     }
 
     // 🔥 FIX ALL MISSING COLUMNS FOR BEAST MODE
