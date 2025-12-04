@@ -1576,7 +1576,7 @@ app.get('/api/product/:upc', async (req, res) => {
         s.yearly_sales,
         s.all_time_sales
       FROM products p
-      LEFT JOIN sales_data s ON p.variant_id = s.variant_id
+      LEFT JOIN sales_data s ON p.variant_id = s.variant_id::TEXT
       WHERE p.barcode = $1
       LIMIT 1
     `, [upc]);
@@ -1698,7 +1698,7 @@ app.get('/api/products/all', async (req, res) => {
         COALESCE(s.monthly_sales, 0) as monthly_sales,
         COALESCE(s.all_time_sales, 0) as all_time_sales
       FROM products p
-      LEFT JOIN sales_data s ON p.variant_id = s.variant_id
+      LEFT JOIN sales_data s ON p.variant_id = s.variant_id::TEXT
       ORDER BY p.title, p.variant_title
     `);
     
