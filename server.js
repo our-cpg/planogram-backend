@@ -676,9 +676,9 @@ async function importSalesData(storeName, accessToken) {
     // Update products with zero sales
     await pool.query(`
       INSERT INTO sales_data (variant_id, daily_sales, weekly_sales, monthly_sales, quarterly_sales, yearly_sales, all_time_sales)
-      SELECT variant_id, 0, 0, 0, 0, 0, 0
+      SELECT variant_id::bigint, 0, 0, 0, 0, 0, 0
       FROM products p
-      WHERE NOT EXISTS (SELECT 1 FROM sales_data s WHERE s.variant_id = p.variant_id)
+      WHERE NOT EXISTS (SELECT 1 FROM sales_data s WHERE s.variant_id = p.variant_id::bigint)
       ON CONFLICT (variant_id) DO NOTHING
     `);
 
@@ -1577,14 +1577,13 @@ app.get('/api/products/all', async (req, res) => {
         p.cost,
         p.inventory_quantity,
         p.vendor,
-        COALESCE(p.distributor, '') as distributor,
         p.tags,
         COALESCE(s.daily_sales, 0) as daily_sales,
         COALESCE(s.weekly_sales, 0) as weekly_sales,
         COALESCE(s.monthly_sales, 0) as monthly_sales,
         COALESCE(s.all_time_sales, 0) as all_time_sales
       FROM products p
-      LEFT JOIN sales_data s ON p.variant_id = s.variant_id::TEXT
+      LEFT JOIN sales_data s ON p.variant_id = s.variant_id
       ORDER BY p.title, p.variant_title
     `);
     
@@ -1616,7 +1615,6 @@ app.get('/api/products/all', async (req, res) => {
         daysLeft: daysLeft,
         risk: risk,
         vendor: row.vendor,
-        distributor: row.distributor,
         tags: row.tags,
         dailySales: parseInt(row.daily_sales) || 0,
         weeklySales: parseInt(row.weekly_sales) || 0,
