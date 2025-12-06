@@ -676,9 +676,9 @@ async function importSalesData(storeName, accessToken) {
     // Update products with zero sales
     await pool.query(`
       INSERT INTO sales_data (variant_id, daily_sales, weekly_sales, monthly_sales, quarterly_sales, yearly_sales, all_time_sales)
-      SELECT variant_id::bigint, 0, 0, 0, 0, 0, 0
+      SELECT variant_id, 0, 0, 0, 0, 0, 0
       FROM products p
-      WHERE NOT EXISTS (SELECT 1 FROM sales_data s WHERE s.variant_id = p.variant_id::bigint)
+      WHERE NOT EXISTS (SELECT 1 FROM sales_data s WHERE s.variant_id = p.variant_id)
       ON CONFLICT (variant_id) DO NOTHING
     `);
 
@@ -956,121 +956,6 @@ async function importOrderData(storeName, accessToken, options = {}) {
     console.error('❌ Order Blitz failed:', error);
     throw error;
   }
-}
-
-// ============================================
-// BACKGROUND ORDER SYNC SYSTEM
-// ============================================
-
-/**
- * Get the most recent order date from database
- * Returns the date to start fetching from
- */
-async function getLastOrderDate() {
-  try {
-    const result = await pool.query(`
-      SELECT MAX(order_date) as last_order_date 
-      FROM orders
-      WHERE order_date IS NOT NULL
-    `);
-    
-    const lastDate = result.rows[0]?.last_order_date;
-    
-    if (lastDate) {
-      console.log(`📅 Last order in database: ${new Date(lastDate).toISOString()}`);
-      // Start from 1 hour before last order to catch any late updates
-      const startDate = new Date(lastDate);
-      startDate.setHours(startDate.getHours() - 1);
-      return startDate;
-    } else {
-      // No orders in database - first run, fetch last year
-      console.log(`📅 No orders in database - fetching last year`);
-      const oneYearAgo = new Date();
-      oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-      return oneYearAgo;
-    }
-  } catch (error) {
-    console.error('⚠️ Error getting last order date:', error);
-    // Fallback to 1 day ago
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    return yesterday;
-  }
-}
-
-/**
- * Background sync function - runs every 5 minutes
- */
-async function backgroundOrderSync() {
-  // Don't run if no settings stored
-  if (!lastSettings || !lastSettings.storeName || !lastSettings.accessToken) {
-    console.log('⏭️ Skipping background order sync: No Shopify credentials stored');
-    return;
-  }
-  
-  console.log('🔄 ═════════════════════════════════════════');
-  console.log('🔄 BACKGROUND ORDER SYNC STARTED');
-  console.log('🔄 ═════════════════════════════════════════');
-  
-  try {
-    const startDate = await getLastOrderDate();
-    const startTime = Date.now();
-    
-    // Use smart sync - only fetch new orders
-    const options = {
-      created_at_min: startDate.toISOString(),
-      fetchAll: false // Don't need all pages for incremental sync
-    };
-    
-    const result = await importOrderData(
-      lastSettings.storeName, 
-      lastSettings.accessToken,
-      options
-    );
-    
-    const duration = Math.round((Date.now() - startTime) / 1000);
-    
-    console.log('✅ ═════════════════════════════════════════');
-    console.log(`✅ BACKGROUND SYNC COMPLETE (${duration}s)`);
-    console.log(`📊 Processed: ${result.ordersProcessed} orders`);
-    console.log(`📦 Items: ${result.itemsProcessed} line items`);
-    console.log('✅ ═════════════════════════════════════════');
-    
-    return result;
-    
-  } catch (error) {
-    console.error('❌ Background order sync failed:', error.message);
-    console.error('Stack:', error.stack);
-  }
-}
-
-/**
- * Start background sync timer
- */
-const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
-let backgroundSyncTimer = null;
-
-function startBackgroundSync() {
-  // Clear any existing timer
-  if (backgroundSyncTimer) {
-    clearInterval(backgroundSyncTimer);
-  }
-  
-  console.log('⏰ Starting background order sync (every 5 minutes)...');
-  
-  // Run immediately on startup (after 30 second delay)
-  setTimeout(() => {
-    console.log('🚀 Initial background sync triggered');
-    backgroundOrderSync();
-  }, 30000); // 30 seconds after server starts
-  
-  // Then run every 5 minutes
-  backgroundSyncTimer = setInterval(() => {
-    console.log('⏰ Scheduled background sync triggered');
-    backgroundOrderSync();
-  }, SYNC_INTERVAL);
-  
-  console.log('✅ Background sync scheduled');
 }
 
 
@@ -1576,7 +1461,7 @@ app.get('/api/product/:upc', async (req, res) => {
         s.yearly_sales,
         s.all_time_sales
       FROM products p
-      LEFT JOIN sales_data s ON p.variant_id = s.variant_id::TEXT
+      LEFT JOIN sales_data s ON p.variant_id = s.variant_id
       WHERE p.barcode = $1
       LIMIT 1
     `, [upc]);
@@ -1692,6 +1577,7 @@ app.get('/api/products/all', async (req, res) => {
         p.cost,
         p.inventory_quantity,
         p.vendor,
+        COALESCE(p.distributor, '') as distributor,
         p.tags,
         COALESCE(s.daily_sales, 0) as daily_sales,
         COALESCE(s.weekly_sales, 0) as weekly_sales,
@@ -1730,6 +1616,7 @@ app.get('/api/products/all', async (req, res) => {
         daysLeft: daysLeft,
         risk: risk,
         vendor: row.vendor,
+        distributor: row.distributor,
         tags: row.tags,
         dailySales: parseInt(row.daily_sales) || 0,
         weeklySales: parseInt(row.weekly_sales) || 0,
@@ -1845,145 +1732,6 @@ app.get('/api/correlations', async (req, res) => {
   }
 });
 
-// ============================================
-// DATABASE ORDER ENDPOINTS
-// ============================================
-
-// Get orders from database (no Shopify API call)
-app.get('/api/orders/from-database', async (req, res) => {
-  try {
-    console.log('📊 Fetching orders from database...');
-    
-    const { limit = 20000 } = req.query;
-    
-    // Get orders
-    const ordersResult = await pool.query(`
-      SELECT 
-        o.order_id,
-        o.order_number,
-        o.customer_id,
-        o.total_price,
-        o.order_date,
-        o.is_returning_customer
-      FROM orders o
-      ORDER BY o.order_date DESC
-      LIMIT $1
-    `, [parseInt(limit)]);
-    
-    const orderIds = ordersResult.rows.map(o => o.order_id);
-    
-    if (orderIds.length === 0) {
-      return res.json({ 
-        orders: [], 
-        totalOrders: 0,
-        source: 'database',
-        message: 'No orders in database. Waiting for background sync...' 
-      });
-    }
-    
-    // Get line items for these orders
-    const itemsResult = await pool.query(`
-      SELECT 
-        order_id,
-        variant_id,
-        product_id,
-        title,
-        variant_title,
-        quantity,
-        price
-      FROM order_items
-      WHERE order_id = ANY($1::bigint[])
-    `, [orderIds]);
-    
-    // Group line items by order
-    const itemsByOrder = {};
-    for (const item of itemsResult.rows) {
-      if (!itemsByOrder[item.order_id]) {
-        itemsByOrder[item.order_id] = [];
-      }
-      itemsByOrder[item.order_id].push({
-        id: item.variant_id,
-        variant_id: item.variant_id,
-        product_id: item.product_id,
-        name: item.title,
-        title: item.title,
-        variant_title: item.variant_title,
-        quantity: item.quantity,
-        price: parseFloat(item.price)
-      });
-    }
-    
-    // Combine orders with their line items
-    const orders = ordersResult.rows.map(order => ({
-      id: order.order_id,
-      order_number: order.order_number,
-      customer: order.customer_id ? { id: order.customer_id } : null,
-      total_price: parseFloat(order.total_price),
-      created_at: order.order_date,
-      line_items: itemsByOrder[order.order_id] || []
-    }));
-    
-    console.log(`✅ Returning ${orders.length} orders from database`);
-    
-    res.json({ 
-      orders,
-      totalOrders: orders.length,
-      source: 'database',
-      lastSync: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    console.error('❌ Error fetching orders from database:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Manually trigger background sync
-app.post('/api/orders/sync-now', async (req, res) => {
-  try {
-    console.log('🔄 Manual sync triggered');
-    
-    // Run in background (don't wait)
-    backgroundOrderSync();
-    
-    res.json({ 
-      success: true, 
-      message: 'Background sync triggered. Check /api/orders/sync-status for progress.' 
-    });
-    
-  } catch (error) {
-    console.error('❌ Manual sync error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Check sync status
-app.get('/api/orders/sync-status', async (req, res) => {
-  try {
-    // Get last order date from database
-    const lastOrderResult = await pool.query(`
-      SELECT 
-        MAX(order_date) as last_order_date,
-        COUNT(*) as total_orders
-      FROM orders
-    `);
-    
-    const lastOrder = lastOrderResult.rows[0];
-    
-    res.json({
-      lastSyncedOrder: lastOrder.last_order_date,
-      totalOrdersInDatabase: parseInt(lastOrder.total_orders),
-      nextSyncIn: Math.round(SYNC_INTERVAL / 1000), // seconds
-      syncInterval: '5 minutes',
-      hasCredentials: !!(lastSettings && lastSettings.storeName && lastSettings.accessToken)
-    });
-    
-  } catch (error) {
-    console.error('❌ Sync status error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Start server
 async function startServer() {
   console.log('🚀 Starting Planogram Backend v2.0 (Sales Tracking + Order Blitz)...');
@@ -1992,12 +1740,8 @@ async function startServer() {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`📊 Sales tracking: ENABLED`);
     console.log(`🔥 Order Blitz: READY`);
-    console.log(`⏰ Background order sync: STARTING...`);
     console.log(`🔥 ALL DATABASE FIXES: APPLIED`);
     console.log(`🔗 Test at: http://localhost:${PORT}`);
-    
-    // Start background sync after server is up
-    startBackgroundSync();
   });
 }
 
