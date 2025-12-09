@@ -155,7 +155,7 @@ async function initDatabase() {
 
 // 🔥 ORDER BLITZ - Optimized incremental sync
 app.post('/api/order-blitz', async (req, res) => {
-  const { storeName, accessToken } = req.body;
+  const { storeName, accessToken, forceFullSync } = req.body;
 
   if (!storeName || !accessToken) {
     return res.status(400).json({ error: 'Missing Shopify credentials' });
@@ -174,6 +174,7 @@ app.post('/api/order-blitz', async (req, res) => {
     orderProcessingStatus.isProcessing = true;
     orderProcessingStatus.progress = { processed: 0, total: 0 };
     console.log('🔥 Order Blitz started');
+    console.log('   Force full sync:', forceFullSync || false);
 
     // Get the most recent order date from database
     const lastOrderResult = await pool.query(`
@@ -182,14 +183,21 @@ app.post('/api/order-blitz', async (req, res) => {
     `);
     
     const lastOrderDate = lastOrderResult.rows[0]?.last_order_date;
-    const sinceDate = lastOrderDate 
-      ? new Date(lastOrderDate).toISOString() 
-      : '2024-01-01T00:00:00Z'; // Default: start of 2024
     
-    console.log(`📅 Fetching orders since: ${sinceDate}`);
+    // Use date filter for incremental sync, or fetch all if force sync
+    let sinceDate = '2023-01-01T00:00:00Z'; // Default to 2 years ago
+    
+    if (!forceFullSync && lastOrderDate) {
+      sinceDate = new Date(lastOrderDate).toISOString();
+      console.log(`📅 Incremental sync - fetching orders since: ${sinceDate}`);
+    } else {
+      console.log(`📅 Full sync - fetching all orders since: ${sinceDate}`);
+    }
 
-    // Fetch only NEW orders from Shopify
+    // Fetch orders from Shopify
     const shopifyUrl = `https://${storeName}/admin/api/2024-10/orders.json?status=any&created_at_min=${sinceDate}&limit=250`;
+    
+    console.log('🌐 Shopify URL:', shopifyUrl.replace(accessToken, 'TOKEN_HIDDEN'));
     
     const shopifyResponse = await fetch(shopifyUrl, {
       headers: {
@@ -198,14 +206,28 @@ app.post('/api/order-blitz', async (req, res) => {
       }
     });
 
+    console.log('📡 Shopify response status:', shopifyResponse.status);
+
     if (!shopifyResponse.ok) {
-      throw new Error(`Shopify API error: ${shopifyResponse.status}`);
+      const errorText = await shopifyResponse.text();
+      console.error('❌ Shopify API error:', errorText);
+      throw new Error(`Shopify API error: ${shopifyResponse.status} - ${errorText}`);
     }
 
     const shopifyData = await shopifyResponse.json();
     const orders = shopifyData.orders || [];
     
-    console.log(`📦 Fetched ${orders.length} new orders from Shopify`);
+    console.log(`📦 Fetched ${orders.length} orders from Shopify`);
+    
+    if (orders.length > 0) {
+      console.log('   Sample order:', {
+        id: orders[0].id,
+        number: orders[0].order_number,
+        date: orders[0].created_at,
+        total: orders[0].total_price
+      });
+    }
+    
     orderProcessingStatus.progress.total = orders.length;
 
     if (orders.length === 0) {
