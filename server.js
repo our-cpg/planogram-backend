@@ -95,6 +95,8 @@ async function initDatabase() {
         subtotal_price DECIMAL(10,2),
         total_tax DECIMAL(10,2),
         order_date TIMESTAMPTZ,
+        financial_status TEXT,
+        fulfillment_status TEXT,
         is_returning_customer BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -243,10 +245,13 @@ app.post('/api/order-blitz', async (req, res) => {
           await pool.query(`
             INSERT INTO orders (
               order_id, order_number, customer_id, customer_email_hash,
-              total_price, subtotal_price, total_tax, order_date, is_returning_customer
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+              total_price, subtotal_price, total_tax, order_date, 
+              financial_status, fulfillment_status, is_returning_customer
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (order_id) DO UPDATE SET
               total_price = EXCLUDED.total_price,
+              financial_status = EXCLUDED.financial_status,
+              fulfillment_status = EXCLUDED.fulfillment_status,
               updated_at = NOW()
           `, [
             order.id,
@@ -257,6 +262,8 @@ app.post('/api/order-blitz', async (req, res) => {
             parseFloat(order.subtotal_price || 0),
             parseFloat(order.total_tax || 0),
             order.created_at,
+            order.financial_status || 'pending',
+            order.fulfillment_status || null,
             false // Will be updated later based on customer history
           ]);
           totalOrdersInserted++;
@@ -347,54 +354,98 @@ app.get('/api/orders/status', async (req, res) => {
 // Get order analytics from database
 app.get('/api/order-analytics', async (req, res) => {
   try {
+    // Use UTC for consistent date calculations
     const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const weekStart = new Date(now);
-    weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // Start of week
+    
+    // Today: from 00:00:00 to 23:59:59 in store's local timezone (assuming US Mountain Time for Denver)
+    // We'll use UTC but adjust for timezone offset
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+    
+    // Week: last 7 days including today
+    const weekStart = new Date(todayStart);
+    weekStart.setDate(weekStart.getDate() - 6); // 7 days including today
+    
+    // Month: first day of current month
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    // Year: January 1st of current year
     const yearStart = new Date(now.getFullYear(), 0, 1);
+    
+    console.log('📅 Date ranges for analytics:');
+    console.log('  Today:', todayStart.toISOString());
+    console.log('  Week:', weekStart.toISOString());
+    console.log('  Month:', monthStart.toISOString());
+    console.log('  Year:', yearStart.toISOString());
 
-    // Get aggregated stats
+    // Get aggregated stats with timezone-aware queries
     const statsResult = await pool.query(`
       SELECT 
         COUNT(*) as total_orders,
         SUM(total_price) as total_revenue,
         COUNT(DISTINCT customer_id) as unique_customers,
-        SUM(CASE WHEN order_date >= $1 THEN total_price ELSE 0 END) as sales_today,
-        COUNT(CASE WHEN order_date >= $1 THEN 1 END) as orders_today,
-        SUM(CASE WHEN order_date >= $2 THEN total_price ELSE 0 END) as sales_week,
-        COUNT(CASE WHEN order_date >= $2 THEN 1 END) as orders_week,
-        SUM(CASE WHEN order_date >= $3 THEN total_price ELSE 0 END) as sales_month,
-        COUNT(CASE WHEN order_date >= $3 THEN 1 END) as orders_month,
-        SUM(CASE WHEN order_date >= $4 THEN total_price ELSE 0 END) as sales_year,
-        COUNT(CASE WHEN order_date >= $4 THEN 1 END) as orders_year
+        SUM(CASE WHEN order_date >= $1::timestamptz THEN total_price ELSE 0 END) as sales_today,
+        COUNT(CASE WHEN order_date >= $1::timestamptz THEN 1 END) as orders_today,
+        SUM(CASE WHEN order_date >= $2::timestamptz THEN total_price ELSE 0 END) as sales_week,
+        COUNT(CASE WHEN order_date >= $2::timestamptz THEN 1 END) as orders_week,
+        SUM(CASE WHEN order_date >= $3::timestamptz THEN total_price ELSE 0 END) as sales_month,
+        COUNT(CASE WHEN order_date >= $3::timestamptz THEN 1 END) as orders_month,
+        SUM(CASE WHEN order_date >= $4::timestamptz THEN total_price ELSE 0 END) as sales_year,
+        COUNT(CASE WHEN order_date >= $4::timestamptz THEN 1 END) as orders_year
       FROM orders
-    `, [todayStart, weekStart, monthStart, yearStart]);
+      WHERE order_date IS NOT NULL
+    `, [todayStart.toISOString(), weekStart.toISOString(), monthStart.toISOString(), yearStart.toISOString()]);
 
-    // Get recent orders with line items
+    // Get recent orders with full details and line items
     const ordersResult = await pool.query(`
       SELECT 
         o.order_id,
         o.order_number,
         o.total_price,
         o.order_date,
-        json_agg(
-          json_build_object(
-            'variant_id', oi.variant_id,
-            'product_id', oi.product_id,
-            'title', oi.title,
-            'quantity', oi.quantity,
-            'price', oi.price
-          )
+        o.customer_id,
+        o.financial_status,
+        o.fulfillment_status,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'variant_id', oi.variant_id,
+              'product_id', oi.product_id,
+              'title', oi.title,
+              'variant_title', oi.variant_title,
+              'quantity', oi.quantity,
+              'price', oi.price
+            ) ORDER BY oi.cart_position
+          ) FILTER (WHERE oi.id IS NOT NULL),
+          '[]'
         ) as line_items
       FROM orders o
       LEFT JOIN order_items oi ON o.order_id = oi.order_id
-      GROUP BY o.order_id, o.order_number, o.total_price, o.order_date
+      WHERE o.order_date IS NOT NULL
+      GROUP BY o.order_id, o.order_number, o.total_price, o.order_date, o.customer_id, o.financial_status, o.fulfillment_status
       ORDER BY o.order_date DESC
       LIMIT 50
     `);
 
     const stats = statsResult.rows[0];
+    
+    console.log('📊 Analytics stats:', {
+      today: parseFloat(stats.sales_today || 0),
+      week: parseFloat(stats.sales_week || 0),
+      month: parseFloat(stats.sales_month || 0)
+    });
+
+    // Format orders for frontend
+    const formattedOrders = ordersResult.rows.map(order => ({
+      id: order.order_id,
+      order_number: order.order_number,
+      created_at: order.order_date,
+      total_price: order.total_price,
+      customer: order.customer_id ? { id: order.customer_id } : null,
+      line_items: order.line_items,
+      financial_status: order.financial_status || 'paid',
+      fulfillment_status: order.fulfillment_status
+    }));
 
     res.json({
       totalOrders: parseInt(stats.total_orders),
@@ -412,7 +463,7 @@ app.get('/api/order-analytics', async (req, res) => {
         month: parseInt(stats.orders_month),
         year: parseInt(stats.orders_year)
       },
-      recentOrders: ordersResult.rows
+      recentOrders: formattedOrders
     });
 
   } catch (error) {
@@ -464,10 +515,13 @@ async function calculateCorrelations() {
   }
 }
 
-// Get product correlations
+// Get product correlations (SQL ONLY - no API calls)
 app.get('/api/correlations', async (req, res) => {
   try {
-    const result = await pool.query(`
+    console.log('🤝 Fetching correlations from database...');
+    
+    // First try to get correlations with full product details from products table
+    let result = await pool.query(`
       SELECT 
         pa.title as product_a_name,
         pa.variant_title as product_a_variant,
@@ -480,30 +534,137 @@ app.get('/api/correlations', async (req, res) => {
         pc.co_purchase_count,
         pc.correlation_score
       FROM product_correlations pc
-      JOIN products pa ON pa.variant_id = pc.variant_a_id
-      JOIN products pb ON pb.variant_id = pc.variant_b_id
+      LEFT JOIN products pa ON pa.variant_id = pc.variant_a_id
+      LEFT JOIN products pb ON pb.variant_id = pc.variant_b_id
+      WHERE pa.variant_id IS NOT NULL 
+        AND pb.variant_id IS NOT NULL
       ORDER BY pc.co_purchase_count DESC
       LIMIT 100
     `);
 
+    // If no results, fall back to using order_items directly
+    if (result.rows.length === 0) {
+      console.log('⚠️ No correlations found with products table, using order_items...');
+      
+      result = await pool.query(`
+        SELECT 
+          oia.title as product_a_name,
+          oia.variant_title as product_a_variant,
+          oia.variant_id as product_a_variant_id,
+          oia.price as product_a_price,
+          oib.title as product_b_name,
+          oib.variant_title as product_b_variant,
+          oib.variant_id as product_b_variant_id,
+          oib.price as product_b_price,
+          pc.co_purchase_count,
+          pc.correlation_score
+        FROM product_correlations pc
+        LEFT JOIN LATERAL (
+          SELECT DISTINCT ON (variant_id) variant_id, title, variant_title, price
+          FROM order_items
+          WHERE variant_id = pc.variant_a_id
+          ORDER BY variant_id, id DESC
+        ) oia ON true
+        LEFT JOIN LATERAL (
+          SELECT DISTINCT ON (variant_id) variant_id, title, variant_title, price
+          FROM order_items
+          WHERE variant_id = pc.variant_b_id
+          ORDER BY variant_id, id DESC
+        ) oib ON true
+        WHERE oia.variant_id IS NOT NULL 
+          AND oib.variant_id IS NOT NULL
+        ORDER BY pc.co_purchase_count DESC
+        LIMIT 100
+      `);
+    }
+
+    console.log(`✅ Found ${result.rows.length} product correlations`);
+
     const correlations = result.rows.map(r => ({
       productA: {
-        name: r.product_a_variant ? `${r.product_a_name} - ${r.product_a_variant}` : r.product_a_name,
-        upc: r.product_a_upc,
+        name: r.product_a_variant 
+          ? `${r.product_a_name} - ${r.product_a_variant}` 
+          : (r.product_a_name || `Product ${r.product_a_variant_id || 'Unknown'}`),
+        upc: r.product_a_upc || null,
         price: parseFloat(r.product_a_price || 0)
       },
       productB: {
-        name: r.product_b_variant ? `${r.product_b_name} - ${r.product_b_variant}` : r.product_b_name,
-        upc: r.product_b_upc,
+        name: r.product_b_variant 
+          ? `${r.product_b_name} - ${r.product_b_variant}` 
+          : (r.product_b_name || `Product ${r.product_b_variant_id || 'Unknown'}`),
+        upc: r.product_b_upc || null,
         price: parseFloat(r.product_b_price || 0)
       },
       timesBoughtTogether: parseInt(r.co_purchase_count),
       correlationScore: parseFloat(r.correlation_score || 0)
     }));
 
+    console.log(`📦 Returning ${correlations.length} correlations to frontend`);
+
     res.json({ correlations });
   } catch (error) {
     console.error('❌ Correlations error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Manually trigger correlation calculation
+app.post('/api/correlations/calculate', async (req, res) => {
+  try {
+    console.log('🔥 Manual correlation calculation triggered');
+    await calculateCorrelations();
+    
+    // Get count of correlations
+    const count = await pool.query('SELECT COUNT(*) as count FROM product_correlations');
+    
+    res.json({ 
+      success: true, 
+      correlationsCalculated: parseInt(count.rows[0].count),
+      message: 'Correlations calculated successfully'
+    });
+  } catch (error) {
+    console.error('❌ Manual correlation calculation failed:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Debug endpoint to check correlation status
+app.get('/api/correlations/debug', async (req, res) => {
+  try {
+    // Check product_correlations table
+    const correlationsCount = await pool.query('SELECT COUNT(*) as count FROM product_correlations');
+    
+    // Check order_items table
+    const orderItemsCount = await pool.query('SELECT COUNT(*) as count FROM order_items');
+    const uniqueVariants = await pool.query('SELECT COUNT(DISTINCT variant_id) as count FROM order_items WHERE variant_id IS NOT NULL');
+    
+    // Sample correlations
+    const sampleCorrelations = await pool.query(`
+      SELECT variant_a_id, variant_b_id, co_purchase_count 
+      FROM product_correlations 
+      ORDER BY co_purchase_count DESC 
+      LIMIT 5
+    `);
+    
+    // Check products table
+    const productsCount = await pool.query('SELECT COUNT(*) as count FROM products');
+    
+    res.json({
+      status: 'OK',
+      correlations: {
+        total: parseInt(correlationsCount.rows[0].count),
+        sample: sampleCorrelations.rows
+      },
+      orderItems: {
+        total: parseInt(orderItemsCount.rows[0].count),
+        uniqueVariants: parseInt(uniqueVariants.rows[0].count)
+      },
+      products: {
+        total: parseInt(productsCount.rows[0].count)
+      }
+    });
+  } catch (error) {
+    console.error('❌ Debug error:', error);
     res.status(500).json({ error: error.message });
   }
 });
