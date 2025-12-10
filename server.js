@@ -433,7 +433,15 @@ app.get('/api/order-analytics', async (req, res) => {
       WHERE order_date IS NOT NULL
     `);
 
-    // Get recent orders with full details and line items
+    // Get ALL order dates for time-based analysis (lightweight)
+    const allOrderDatesResult = await pool.query(`
+      SELECT order_date
+      FROM orders
+      WHERE order_date IS NOT NULL
+      ORDER BY order_date DESC
+    `);
+
+    // Get recent orders with full details and line items (limited to 50 for display)
     const ordersResult = await pool.query(`
       SELECT 
         o.order_id,
@@ -499,7 +507,9 @@ app.get('/api/order-analytics', async (req, res) => {
         month: parseInt(stats.orders_month),
         year: parseInt(stats.orders_year)
       },
-      recentOrders: formattedOrders
+      recentOrders: formattedOrders,
+      // All order dates for "When Do People Buy?" analysis (lightweight)
+      allOrderDates: allOrderDatesResult.rows.map(row => row.order_date)
     });
 
   } catch (error) {
