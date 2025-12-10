@@ -640,6 +640,77 @@ app.get('/api/correlations', async (req, res) => {
   }
 });
 
+// Get all products from database
+app.get('/api/products/all', async (req, res) => {
+  try {
+    console.log('📦 Fetching all products from database...');
+    
+    const result = await pool.query(`
+      SELECT 
+        product_id,
+        variant_id,
+        title,
+        variant_title,
+        price,
+        compare_at_price,
+        barcode,
+        sku,
+        inventory_quantity,
+        image_url
+      FROM products
+      ORDER BY title, variant_title
+    `);
+
+    console.log(`✅ Found ${result.rows.length} products`);
+
+    const products = result.rows.map(p => ({
+      id: p.product_id,
+      variant_id: p.variant_id,
+      title: p.title,
+      variant_title: p.variant_title,
+      price: parseFloat(p.price || 0),
+      compare_at_price: parseFloat(p.compare_at_price || 0),
+      barcode: p.barcode,
+      sku: p.sku,
+      inventory_quantity: parseInt(p.inventory_quantity || 0),
+      image: p.image_url ? { src: p.image_url } : null
+    }));
+
+    res.json({ products });
+  } catch (error) {
+    console.error('❌ Products error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Legacy endpoint for refreshing products (redirects to new system)
+app.post('/api/shopify', async (req, res) => {
+  const { action } = req.body;
+  
+  if (action === 'refreshProducts') {
+    // Just return products from database
+    try {
+      const result = await pool.query('SELECT COUNT(*) as count FROM products');
+      res.json({ 
+        success: true, 
+        message: `${result.rows[0].count} products available in database`,
+        note: 'Products are loaded from database. Use Order Blitz to sync order data.'
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  } else if (action === 'refreshSales') {
+    // Redirect to Order Blitz
+    res.json({
+      success: true,
+      message: 'Use Order Blitz to refresh sales data',
+      redirect: '/api/order-blitz'
+    });
+  } else {
+    res.status(400).json({ error: 'Unknown action' });
+  }
+});
+
 // Manually trigger correlation calculation
 app.post('/api/correlations/calculate', async (req, res) => {
   try {
