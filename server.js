@@ -680,6 +680,75 @@ app.get('/api/products/all', async (req, res) => {
   }
 });
 
+// Get hot products that are out of stock
+app.get('/api/products/hot-out-of-stock', async (req, res) => {
+  try {
+    console.log('🔥 Fetching hot products that are out of stock...');
+    
+    // Find products that:
+    // 1. Have been ordered frequently (from order_items)
+    // 2. Have low/zero inventory (from products)
+    const result = await pool.query(`
+      WITH product_sales AS (
+        SELECT 
+          oi.variant_id,
+          oi.title,
+          oi.variant_title,
+          COUNT(DISTINCT oi.order_id) as times_ordered,
+          SUM(oi.quantity) as total_quantity_sold,
+          AVG(oi.price) as avg_price
+        FROM order_items oi
+        WHERE oi.variant_id IS NOT NULL
+        GROUP BY oi.variant_id, oi.title, oi.variant_title
+        HAVING COUNT(DISTINCT oi.order_id) >= 3  -- Ordered at least 3 times
+      )
+      SELECT 
+        ps.variant_id,
+        ps.title,
+        ps.variant_title,
+        ps.times_ordered,
+        ps.total_quantity_sold,
+        ps.avg_price,
+        COALESCE(p.inventory_quantity, 0) as current_stock,
+        p.sku,
+        p.barcode
+      FROM product_sales ps
+      LEFT JOIN products p ON p.variant_id = ps.variant_id
+      WHERE COALESCE(p.inventory_quantity, 0) <= 5  -- Out of stock or very low
+      ORDER BY ps.times_ordered DESC, ps.total_quantity_sold DESC
+      LIMIT 50
+    `);
+
+    console.log(`✅ Found ${result.rows.length} hot products that need restocking`);
+
+    const hotProducts = result.rows.map(p => ({
+      variant_id: p.variant_id,
+      name: p.variant_title ? `${p.title} - ${p.variant_title}` : p.title,
+      title: p.title,
+      variant_title: p.variant_title,
+      times_ordered: parseInt(p.times_ordered),
+      total_sold: parseInt(p.total_quantity_sold),
+      avg_price: parseFloat(p.avg_price),
+      current_stock: parseInt(p.current_stock),
+      sku: p.sku,
+      barcode: p.barcode,
+      urgency: p.current_stock <= 0 ? 'critical' : 'low'
+    }));
+
+    res.json({ 
+      hotProducts,
+      summary: {
+        total: hotProducts.length,
+        critical: hotProducts.filter(p => p.current_stock <= 0).length,
+        low: hotProducts.filter(p => p.current_stock > 0 && p.current_stock <= 5).length
+      }
+    });
+  } catch (error) {
+    console.error('❌ Hot products error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Legacy endpoint for refreshing products (redirects to new system)
 app.post('/api/shopify', async (req, res) => {
   const { action } = req.body;
