@@ -303,9 +303,10 @@ app.post('/api/order-blitz', async (req, res) => {
                   order_id, variant_id, product_id, title, variant_title,
                   quantity, price, cart_position
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (order_id, variant_id, cart_position) DO UPDATE SET
+                ON CONFLICT (order_id, variant_id) DO UPDATE SET
                   quantity = EXCLUDED.quantity,
-                  price = EXCLUDED.price
+                  price = EXCLUDED.price,
+                  cart_position = EXCLUDED.cart_position
               `, [
                 order.id,
                 item.variant_id?.toString() || null,
