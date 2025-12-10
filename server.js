@@ -376,47 +376,58 @@ app.get('/api/orders/status', async (req, res) => {
 // Get order analytics from database
 app.get('/api/order-analytics', async (req, res) => {
   try {
-    // Use UTC for consistent date calculations
-    const now = new Date();
+    console.log('📊 Fetching order analytics with timezone awareness...');
     
-    // Today: from 00:00:00 to 23:59:59 in store's local timezone (assuming US Mountain Time for Denver)
-    // We'll use UTC but adjust for timezone offset
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-    
-    // Week: last 7 days including today
-    const weekStart = new Date(todayStart);
-    weekStart.setDate(weekStart.getDate() - 6); // 7 days including today
-    
-    // Month: first day of current month
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    
-    // Year: January 1st of current year
-    const yearStart = new Date(now.getFullYear(), 0, 1);
-    
-    console.log('📅 Date ranges for analytics:');
-    console.log('  Today:', todayStart.toISOString());
-    console.log('  Week:', weekStart.toISOString());
-    console.log('  Month:', monthStart.toISOString());
-    console.log('  Year:', yearStart.toISOString());
-
-    // Get aggregated stats with timezone-aware queries
+    // Get aggregated stats with PROPER TIMEZONE HANDLING for Denver (Mountain Time)
     const statsResult = await pool.query(`
       SELECT 
         COUNT(*) as total_orders,
         SUM(total_price) as total_revenue,
         COUNT(DISTINCT customer_id) as unique_customers,
-        SUM(CASE WHEN order_date >= $1::timestamptz THEN total_price ELSE 0 END) as sales_today,
-        COUNT(CASE WHEN order_date >= $1::timestamptz THEN 1 END) as orders_today,
-        SUM(CASE WHEN order_date >= $2::timestamptz THEN total_price ELSE 0 END) as sales_week,
-        COUNT(CASE WHEN order_date >= $2::timestamptz THEN 1 END) as orders_week,
-        SUM(CASE WHEN order_date >= $3::timestamptz THEN total_price ELSE 0 END) as sales_month,
-        COUNT(CASE WHEN order_date >= $3::timestamptz THEN 1 END) as orders_month,
-        SUM(CASE WHEN order_date >= $4::timestamptz THEN total_price ELSE 0 END) as sales_year,
-        COUNT(CASE WHEN order_date >= $4::timestamptz THEN 1 END) as orders_year
+        
+        -- Today: Compare dates in Mountain Time
+        SUM(CASE 
+          WHEN DATE(order_date AT TIME ZONE 'America/Denver') = DATE(NOW() AT TIME ZONE 'America/Denver') 
+          THEN total_price ELSE 0 
+        END) as sales_today,
+        COUNT(CASE 
+          WHEN DATE(order_date AT TIME ZONE 'America/Denver') = DATE(NOW() AT TIME ZONE 'America/Denver') 
+          THEN 1 
+        END) as orders_today,
+        
+        -- This Week: Last 7 days in Mountain Time
+        SUM(CASE 
+          WHEN order_date AT TIME ZONE 'America/Denver' >= (NOW() AT TIME ZONE 'America/Denver' - INTERVAL '6 days')
+          THEN total_price ELSE 0 
+        END) as sales_week,
+        COUNT(CASE 
+          WHEN order_date AT TIME ZONE 'America/Denver' >= (NOW() AT TIME ZONE 'America/Denver' - INTERVAL '6 days')
+          THEN 1 
+        END) as orders_week,
+        
+        -- This Month: Current month in Mountain Time
+        SUM(CASE 
+          WHEN DATE_TRUNC('month', order_date AT TIME ZONE 'America/Denver') = DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Denver')
+          THEN total_price ELSE 0 
+        END) as sales_month,
+        COUNT(CASE 
+          WHEN DATE_TRUNC('month', order_date AT TIME ZONE 'America/Denver') = DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Denver')
+          THEN 1 
+        END) as orders_month,
+        
+        -- This Year: Current year in Mountain Time
+        SUM(CASE 
+          WHEN DATE_TRUNC('year', order_date AT TIME ZONE 'America/Denver') = DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Denver')
+          THEN total_price ELSE 0 
+        END) as sales_year,
+        COUNT(CASE 
+          WHEN DATE_TRUNC('year', order_date AT TIME ZONE 'America/Denver') = DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Denver')
+          THEN 1 
+        END) as orders_year
+        
       FROM orders
       WHERE order_date IS NOT NULL
-    `, [todayStart.toISOString(), weekStart.toISOString(), monthStart.toISOString(), yearStart.toISOString()]);
+    `);
 
     // Get recent orders with full details and line items
     const ordersResult = await pool.query(`
@@ -451,11 +462,10 @@ app.get('/api/order-analytics', async (req, res) => {
 
     const stats = statsResult.rows[0];
     
-    console.log('📊 Analytics stats:', {
-      today: parseFloat(stats.sales_today || 0),
-      week: parseFloat(stats.sales_week || 0),
-      month: parseFloat(stats.sales_month || 0)
-    });
+    console.log('📊 Analytics calculated (Mountain Time):');
+    console.log('   Today:', parseFloat(stats.sales_today || 0), `(${stats.orders_today} orders)`);
+    console.log('   Week:', parseFloat(stats.sales_week || 0), `(${stats.orders_week} orders)`);
+    console.log('   Month:', parseFloat(stats.sales_month || 0), `(${stats.orders_month} orders)`);
 
     // Format orders for frontend
     const formattedOrders = ordersResult.rows.map(order => ({
