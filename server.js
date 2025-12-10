@@ -188,8 +188,11 @@ app.post('/api/order-blitz', async (req, res) => {
     let sinceDate = '2023-01-01T00:00:00Z'; // Default to 2 years ago
     
     if (!forceFullSync && lastOrderDate) {
-      sinceDate = new Date(lastOrderDate).toISOString();
-      console.log(`📅 Incremental sync - fetching orders since: ${sinceDate}`);
+      // Subtract 5 minutes from last order to create overlap and prevent gaps
+      const bufferDate = new Date(lastOrderDate);
+      bufferDate.setMinutes(bufferDate.getMinutes() - 5);
+      sinceDate = bufferDate.toISOString();
+      console.log(`📅 Incremental sync - fetching orders since: ${sinceDate} (5min buffer)`);
     } else {
       console.log(`📅 Full sync - fetching all orders since: ${sinceDate}`);
     }
