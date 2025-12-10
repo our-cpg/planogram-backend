@@ -658,15 +658,26 @@ app.get('/api/products/all', async (req, res) => {
 
     const products = result.rows.map(p => ({
       id: p.product_id || p.id,
-      variant_id: p.variant_id,
+      variantId: p.variant_id,
       title: p.title || 'Untitled',
-      variant_title: p.variant_title || null,
+      variantTitle: p.variant_title || null,
+      name: p.variant_title ? `${p.title} - ${p.variant_title}` : p.title,
       price: parseFloat(p.price || 0),
-      compare_at_price: parseFloat(p.compare_at_price || 0),
+      compareAtPrice: parseFloat(p.compare_at_price || 0),
       barcode: p.barcode || null,
       sku: p.sku || null,
-      inventory_quantity: parseInt(p.inventory_quantity || p.inventory || 0),
-      image: p.image_url ? { src: p.image_url } : (p.image ? { src: p.image } : null)
+      vendor: p.vendor || null,
+      distributor: p.distributor || null,
+      inventoryQuantity: parseInt(p.inventory_quantity || p.inventory || 0),
+      stock: parseInt(p.inventory_quantity || p.inventory || 0), // Also include as 'stock' for compatibility
+      image: p.image_url ? { src: p.image_url } : (p.image ? { src: p.image } : null),
+      // Sales data if available
+      dailySales: parseInt(p.daily_sales || 0),
+      weeklySales: parseInt(p.weekly_sales || 0),
+      monthlySales: parseInt(p.monthly_sales || 0),
+      quarterlySales: parseInt(p.quarterly_sales || 0),
+      yearlySales: parseInt(p.yearly_sales || 0),
+      allTimeSales: parseInt(p.all_time_sales || 0)
     }));
 
     res.json({ products });
