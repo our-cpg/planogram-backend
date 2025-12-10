@@ -645,41 +645,38 @@ app.get('/api/products/all', async (req, res) => {
   try {
     console.log('📦 Fetching all products from database...');
     
+    // Query with only the columns that definitely exist
     const result = await pool.query(`
-      SELECT 
-        product_id,
-        variant_id,
-        title,
-        variant_title,
-        price,
-        compare_at_price,
-        barcode,
-        sku,
-        inventory_quantity,
-        image_url
-      FROM products
-      ORDER BY title, variant_title
+      SELECT * FROM products LIMIT 5000
     `);
 
     console.log(`✅ Found ${result.rows.length} products`);
+    
+    if (result.rows.length > 0) {
+      console.log('📋 Sample product columns:', Object.keys(result.rows[0]));
+    }
 
     const products = result.rows.map(p => ({
-      id: p.product_id,
+      id: p.product_id || p.id,
       variant_id: p.variant_id,
-      title: p.title,
-      variant_title: p.variant_title,
+      title: p.title || 'Untitled',
+      variant_title: p.variant_title || null,
       price: parseFloat(p.price || 0),
       compare_at_price: parseFloat(p.compare_at_price || 0),
-      barcode: p.barcode,
-      sku: p.sku,
-      inventory_quantity: parseInt(p.inventory_quantity || 0),
-      image: p.image_url ? { src: p.image_url } : null
+      barcode: p.barcode || null,
+      sku: p.sku || null,
+      inventory_quantity: parseInt(p.inventory_quantity || p.inventory || 0),
+      image: p.image_url ? { src: p.image_url } : (p.image ? { src: p.image } : null)
     }));
 
     res.json({ products });
   } catch (error) {
     console.error('❌ Products error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('   Error details:', error.message);
+    res.status(500).json({ 
+      error: error.message,
+      details: 'Check backend logs for SQL error details'
+    });
   }
 });
 
