@@ -295,36 +295,49 @@ app.post('/api/order-blitz', async (req, res) => {
 
           // Insert line items
           if (order.line_items && order.line_items.length > 0) {
+            console.log(`📦 Processing ${order.line_items.length} line items for order ${order.id}`);
+            
             for (let position = 0; position < order.line_items.length; position++) {
               const item = order.line_items[position];
               
-              // Generate unique variant_id for custom sale items (no variant_id from Shopify)
-              let variantId = item.variant_id?.toString() || null;
-              if (!variantId) {
-                // Custom sale items get a generated ID: custom_{order_id}_{position}
-                variantId = `custom_${order.id}_${position}`;
+              try {
+                // Generate unique variant_id for custom sale items (no variant_id from Shopify)
+                let variantId = item.variant_id?.toString() || null;
+                
+                // Check if this is a custom sale item
+                const isCustomItem = !variantId || item.sku === null || item.sku === '';
+                
+                if (isCustomItem) {
+                  // Custom sale items get a generated ID: custom_{order_id}_{position}
+                  variantId = `custom_${order.id}_${position}`;
+                  console.log(`   🎨 Custom item detected at position ${position}: "${item.title || 'Unknown'}" → Generated ID: ${variantId}`);
+                }
+                
+                await pool.query(`
+                  INSERT INTO order_items (
+                    order_id, variant_id, product_id, title, variant_title,
+                    quantity, price, cart_position
+                  ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                  ON CONFLICT (order_id, variant_id) DO UPDATE SET
+                    quantity = EXCLUDED.quantity,
+                    price = EXCLUDED.price,
+                    cart_position = EXCLUDED.cart_position
+                `, [
+                  order.id,
+                  variantId,
+                  item.product_id?.toString() || null,
+                  item.title || 'Custom Item',
+                  item.variant_title || null,
+                  item.quantity || 1,
+                  parseFloat(item.price || 0),
+                  position
+                ]);
+                
+                totalItemsInserted++;
+              } catch (itemErr) {
+                console.error(`   ❌ Failed to insert item at position ${position}:`, itemErr.message);
+                console.error(`   Item data:`, JSON.stringify(item, null, 2));
               }
-              
-              await pool.query(`
-                INSERT INTO order_items (
-                  order_id, variant_id, product_id, title, variant_title,
-                  quantity, price, cart_position
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (order_id, variant_id) DO UPDATE SET
-                  quantity = EXCLUDED.quantity,
-                  price = EXCLUDED.price,
-                  cart_position = EXCLUDED.cart_position
-              `, [
-                order.id,
-                variantId,
-                item.product_id?.toString() || null,
-                item.title || 'Unknown',
-                item.variant_title || null,
-                item.quantity || 1,
-                parseFloat(item.price || 0),
-                position
-              ]);
-              totalItemsInserted++;
             }
           }
 
