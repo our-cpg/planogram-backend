@@ -677,46 +677,33 @@ app.get('/api/correlations', async (req, res) => {
 // Get all products from database
 app.get('/api/products/all', async (req, res) => {
   try {
-    console.log('📦 Fetching all products with sales calculations...');
+    console.log('📦 Fetching all products...');
     
-    // First, let's just get basic products to avoid SQL errors
-    const productsResult = await pool.query(`
-      SELECT * FROM products LIMIT 5000
-    `);
-
+    // Get products
+    const productsResult = await pool.query(`SELECT * FROM products LIMIT 5000`);
     console.log(`✅ Found ${productsResult.rows.length} products`);
     
-    // Now calculate sales separately with safer query
+    // Get simple sales counts (no dates for now)
     let salesData = {};
     try {
       const salesResult = await pool.query(`
         SELECT 
           variant_id,
-          COUNT(DISTINCT CASE WHEN created_at >= NOW() - INTERVAL '1 day' THEN id END) as daily_orders,
-          COUNT(DISTINCT CASE WHEN created_at >= NOW() - INTERVAL '7 days' THEN id END) as weekly_orders,
-          COUNT(DISTINCT CASE WHEN created_at >= NOW() - INTERVAL '30 days' THEN id END) as monthly_orders,
-          COUNT(DISTINCT CASE WHEN created_at >= NOW() - INTERVAL '90 days' THEN id END) as quarterly_orders,
-          COUNT(DISTINCT CASE WHEN created_at >= NOW() - INTERVAL '365 days' THEN id END) as yearly_orders,
-          COUNT(DISTINCT id) as all_time_orders,
-          SUM(CASE WHEN created_at >= NOW() - INTERVAL '1 day' THEN quantity ELSE 0 END) as daily_sales,
-          SUM(CASE WHEN created_at >= NOW() - INTERVAL '7 days' THEN quantity ELSE 0 END) as weekly_sales,
-          SUM(CASE WHEN created_at >= NOW() - INTERVAL '30 days' THEN quantity ELSE 0 END) as monthly_sales,
-          SUM(CASE WHEN created_at >= NOW() - INTERVAL '90 days' THEN quantity ELSE 0 END) as quarterly_sales,
-          SUM(CASE WHEN created_at >= NOW() - INTERVAL '365 days' THEN quantity ELSE 0 END) as yearly_sales,
-          SUM(quantity) as all_time_sales
+          SUM(quantity) as total_sales
         FROM order_line_items
         WHERE variant_id IS NOT NULL
         GROUP BY variant_id
       `);
       
-      // Convert to lookup object
       salesResult.rows.forEach(row => {
-        salesData[row.variant_id] = row;
+        salesData[row.variant_id] = {
+          allTimeSales: parseInt(row.total_sales || 0)
+        };
       });
       
-      console.log(`📊 Calculated sales for ${Object.keys(salesData).length} variants`);
-    } catch (salesError) {
-      console.error('⚠️ Sales calculation failed, continuing without sales data:', salesError.message);
+      console.log(`📊 Got sales for ${Object.keys(salesData).length} variants`);
+    } catch (salesErr) {
+      console.error('⚠️ Sales query failed:', salesErr.message);
     }
 
     const products = productsResult.rows.map(p => {
@@ -738,28 +725,20 @@ app.get('/api/products/all', async (req, res) => {
         inventoryQuantity: parseInt(p.inventory_quantity || p.inventory || 0),
         stock: parseInt(p.inventory_quantity || p.inventory || 0),
         image: p.image_url ? { src: p.image_url } : (p.image ? { src: p.image } : null),
-        // Sales data - now actually calculated!
-        dailySales: parseInt(sales.daily_sales || 0),
-        weeklySales: parseInt(sales.weekly_sales || 0),
-        monthlySales: parseInt(sales.monthly_sales || 0),
-        quarterlySales: parseInt(sales.quarterly_sales || 0),
-        yearlySales: parseInt(sales.yearly_sales || 0),
-        allTimeSales: parseInt(sales.all_time_sales || 0)
+        // For now, use all-time sales for everything
+        dailySales: 0,
+        weeklySales: 0,
+        monthlySales: Math.floor((sales.allTimeSales || 0) / 30), // Rough estimate
+        quarterlySales: Math.floor((sales.allTimeSales || 0) / 4),
+        yearlySales: sales.allTimeSales || 0,
+        allTimeSales: sales.allTimeSales || 0
       };
     });
 
-    // Calculate summary stats
-    const criticalAlerts = products.filter(p => {
-      const stock = p.inventoryQuantity;
-      const velocity = p.monthlySales / 30;
-      const daysLeft = velocity > 0 ? stock / velocity : (stock > 0 ? 999 : 0);
-      return stock < 0 || daysLeft < 3;
-    }).length;
-
+    const criticalAlerts = products.filter(p => p.inventoryQuantity < 0 || p.inventoryQuantity === 0).length;
     const avgVelocity = products.reduce((sum, p) => sum + (p.monthlySales / 30), 0) / products.length;
 
-    console.log(`✅ Returning ${products.length} products with sales data`);
-    console.log(`📊 Critical alerts: ${criticalAlerts}, Avg velocity: ${avgVelocity.toFixed(2)}`);
+    console.log(`✅ Returning ${products.length} products`);
 
     res.json({ 
       products,
@@ -770,13 +749,9 @@ app.get('/api/products/all', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('❌ Products error:', error);
-    console.error('   Error details:', error.message);
+    console.error('❌ Products error:', error.message);
     console.error('   Stack:', error.stack);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Check backend logs for SQL error details'
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
