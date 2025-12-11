@@ -677,17 +677,59 @@ app.get('/api/correlations', async (req, res) => {
 // Get all products from database
 app.get('/api/products/all', async (req, res) => {
   try {
-    console.log('📦 Fetching all products from database...');
+    console.log('📦 Fetching all products with sales calculations...');
     
-    // Query with only the columns that definitely exist
+    // Calculate sales for different time periods from order_line_items
     const result = await pool.query(`
-      SELECT * FROM products LIMIT 5000
+      WITH sales_by_period AS (
+        SELECT 
+          oli.variant_id,
+          -- Last 1 day
+          SUM(CASE WHEN o.created_at >= NOW() - INTERVAL '1 day' THEN oli.quantity ELSE 0 END) as daily_sales,
+          -- Last 7 days
+          SUM(CASE WHEN o.created_at >= NOW() - INTERVAL '7 days' THEN oli.quantity ELSE 0 END) as weekly_sales,
+          -- Last 30 days
+          SUM(CASE WHEN o.created_at >= NOW() - INTERVAL '30 days' THEN oli.quantity ELSE 0 END) as monthly_sales,
+          -- Last 90 days (quarterly)
+          SUM(CASE WHEN o.created_at >= NOW() - INTERVAL '90 days' THEN oli.quantity ELSE 0 END) as quarterly_sales,
+          -- Last 365 days (yearly)
+          SUM(CASE WHEN o.created_at >= NOW() - INTERVAL '365 days' THEN oli.quantity ELSE 0 END) as yearly_sales,
+          -- All time
+          SUM(oli.quantity) as all_time_sales
+        FROM order_line_items oli
+        JOIN orders o ON oli.order_id = o.id
+        WHERE oli.variant_id IS NOT NULL
+        GROUP BY oli.variant_id
+      )
+      SELECT 
+        p.*,
+        COALESCE(s.daily_sales, 0) as daily_sales,
+        COALESCE(s.weekly_sales, 0) as weekly_sales,
+        COALESCE(s.monthly_sales, 0) as monthly_sales,
+        COALESCE(s.quarterly_sales, 0) as quarterly_sales,
+        COALESCE(s.yearly_sales, 0) as yearly_sales,
+        COALESCE(s.all_time_sales, 0) as all_time_sales
+      FROM products p
+      LEFT JOIN sales_by_period s ON p.variant_id = s.variant_id
+      LIMIT 5000
     `);
 
-    console.log(`✅ Found ${result.rows.length} products`);
+    console.log(`✅ Found ${result.rows.length} products with sales data`);
     
     if (result.rows.length > 0) {
-      console.log('📋 Sample product columns:', Object.keys(result.rows[0]));
+      // Log sample to verify sales calculations
+      const samplesWithSales = result.rows.filter(p => p.all_time_sales > 0).slice(0, 3);
+      if (samplesWithSales.length > 0) {
+        console.log('📊 Sample products with sales:', samplesWithSales.map(p => ({
+          name: p.title,
+          daily: p.daily_sales,
+          weekly: p.weekly_sales,
+          monthly: p.monthly_sales,
+          quarterly: p.quarterly_sales,
+          yearly: p.yearly_sales,
+          allTime: p.all_time_sales
+        })));
+      }
     }
 
     const products = result.rows.map(p => ({
@@ -702,10 +744,11 @@ app.get('/api/products/all', async (req, res) => {
       sku: p.sku || null,
       vendor: p.vendor || null,
       distributor: p.distributor || null,
+      cost: parseFloat(p.cost || 0),
       inventoryQuantity: parseInt(p.inventory_quantity || p.inventory || 0),
-      stock: parseInt(p.inventory_quantity || p.inventory || 0), // Also include as 'stock' for compatibility
+      stock: parseInt(p.inventory_quantity || p.inventory || 0),
       image: p.image_url ? { src: p.image_url } : (p.image ? { src: p.image } : null),
-      // Sales data if available
+      // Sales data - now actually calculated!
       dailySales: parseInt(p.daily_sales || 0),
       weeklySales: parseInt(p.weekly_sales || 0),
       monthlySales: parseInt(p.monthly_sales || 0),
@@ -714,7 +757,24 @@ app.get('/api/products/all', async (req, res) => {
       allTimeSales: parseInt(p.all_time_sales || 0)
     }));
 
-    res.json({ products });
+    // Calculate summary stats
+    const criticalAlerts = products.filter(p => {
+      const stock = p.inventoryQuantity;
+      const velocity = p.monthlySales / 30;
+      const daysLeft = velocity > 0 ? stock / velocity : (stock > 0 ? 999 : 0);
+      return stock < 0 || daysLeft < 3;
+    }).length;
+
+    const avgVelocity = products.reduce((sum, p) => sum + (p.monthlySales / 30), 0) / products.length;
+
+    res.json({ 
+      products,
+      summary: {
+        totalProducts: products.length,
+        criticalAlerts,
+        avgVelocity: avgVelocity.toFixed(2)
+      }
+    });
   } catch (error) {
     console.error('❌ Products error:', error);
     console.error('   Error details:', error.message);
