@@ -690,7 +690,7 @@ app.get('/api/products/all', async (req, res) => {
         SELECT 
           variant_id,
           SUM(quantity) as total_sales
-        FROM order_line_items
+        FROM order_items
         WHERE variant_id IS NOT NULL
         GROUP BY variant_id
       `);
